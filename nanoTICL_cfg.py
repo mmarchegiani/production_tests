@@ -18,6 +18,11 @@ process.load('Configuration.StandardSequences.Reconstruction_cff')
 process.load('Configuration.StandardSequences.FrontierConditions_GlobalTag_cff')
 process.load('Configuration.Geometry.GeometryExtendedRun4D110Reco_cff')
 process.load('Configuration.EventContent.EventContent_cff')
+process.load('SimGeneral.HepPDTESSource.pythiapdt_cfi')
+process.load('FWCore.MessageService.MessageLogger_cfi')
+process.load('SimGeneral.MixingModule.mixNoPU_cfi')
+process.load('Configuration.Geometry.GeometryExtendedRun4D110_cff')
+process.load('DPGAnalysis.HGCalNanoAOD.nanoHGCML_cff')
 process.load('SimCalorimetry.HGCalSimProducers.hgcHitAssociation_cfi')
 process.load('SimCalorimetry.HGCalAssociatorProducers.LCToTSAssociator_cfi')
 process.load('SimCalorimetry.HGCalAssociatorProducers.HitToTracksterAssociation_cfi')
@@ -27,6 +32,10 @@ process.load('RecoHGCal.TICL.ticlLayerTileProducer_cfi')
 process.load('RecoHGCal.TICL.trackstersProducer_cfi')
 process.load('RecoHGCal.TICL.filteredLayerClustersProducer_cfi')
 process.load('RecoHGCal.TICL.SimTracksters_cff')
+
+# Fix for ProductNotFound error with FlatEtaRangeGunProducer
+process.tpClusterProducer.pixelSimLinkSrc = cms.InputTag("simSiPixelDigis", "Pixel")
+process.tpClusterProducer.phase2OTSimLinkSrc = cms.InputTag("simSiPixelDigis", "Tracker")
 
 from Configuration.AlCa.GlobalTag import GlobalTag
 process.GlobalTag = GlobalTag(process.GlobalTag, 'auto:phase2_realistic', '')
@@ -68,6 +77,11 @@ process.FEVTDEBUGHLToutput = cms.OutputModule("PoolOutputModule",
 # Apply TICLv5 customization
 process = customiseTICLv5FromReco(process, enableDumper=True)
 
+# Apply nanoHGCML customizations for MergedSimClusters
+from DPGAnalysis.HGCalNanoAOD.nanoHGCML_cff import customizeReco, customizeMergedSimClusters
+process = customizeMergedSimClusters(process)
+process = customizeReco(process)
+
 # Configure the TICL dumper to save desired information
 #from RecoHGCal.TICL.customiseTICLFromReco import customiseTICLForDumper
 #process = customiseTICLForDumper(process, histoName = "histo.root")
@@ -92,7 +106,11 @@ process.TFileService = cms.Service("TFileService",
                                     )
 process.ticlDumper_step = cms.EndPath(process.ticlDumper)
 
-# Add ticlDumper_step as last step in the schedule
+# Add nanoHGCML sequence for MergedSimClusters (will be saved to NanoAOD output)
+process.nanoHGCML_step = cms.Path(process.nanoHGCMLSequence)
+
+# Add steps to schedule
+process.schedule.append(process.nanoHGCML_step)
 process.schedule.append(process.ticlDumper_step)
 
 # Output
@@ -113,4 +131,12 @@ process.NANOAODSIMoutput.outputCommands.remove("keep edmTriggerResults_*_*_*")
 process.NANOAODSIMoutput_step = cms.EndPath(process.NANOAODSIMoutput)
 
 process.schedule.append(process.NANOAODSIMoutput_step)
+
+# Helper to associate tools
+from PhysicsTools.PatAlgos.tools.helpers import associatePatAlgosToolsTask
+associatePatAlgosToolsTask(process)
+
+# Add early deletion to reduce memory usage
+from Configuration.StandardSequences.earlyDeleteSettings_cff import customiseEarlyDelete
+process = customiseEarlyDelete(process)
 
