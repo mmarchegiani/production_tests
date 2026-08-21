@@ -29,9 +29,10 @@ def parse_args():
 # Branches grouped by object family. Prefixes match the nano flat table
 # naming: e.g. "SimCluster_" branches all belong to the SimCluster object.
 #
-# Note: SimCluster_isPileup and MergedSimCluster_isPileup are derived in
-# process_batch() from the corresponding bunchCrossing/eventId branches
-# (signal iff BX==0 AND eventId==0). They are not read from disk.
+# Note: SimCluster_isPileup, MergedSimCluster_isPileup and
+# MergedCaloTruthMergedSimCluster_isPileup are derived in process_batch() from
+# the corresponding bunchCrossing/eventId branches (signal iff BX==0 AND
+# eventId==0). They are not read from disk.
 BRANCH_GROUPS = {
     "RecHitHGC": [
         'RecHitHGC_x', 'RecHitHGC_y', 'RecHitHGC_z',
@@ -42,6 +43,8 @@ BRANCH_GROUPS = {
         'RecHitHGC_MergedSimClusterBestMatchQual',
         'RecHitHGC_SimClusterBestMatchIdx',
         'RecHitHGC_SimClusterBestMatchQual',
+        'RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchIdx',
+        'RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchQual',
         # LayerCluster match (starts the RecHit->LC->Trackster->TICLCand chain)
         'RecHitHGC_LayerCluster_MatchIdx',
         'RecHitHGC_LayerClusterNumMatch',
@@ -54,6 +57,14 @@ BRANCH_GROUPS = {
         'MergedSimCluster_pdgId', 'MergedSimCluster_trackIdAtBoundary',
         # Signal/pileup discrimination: signal iff bunchCrossing==0 & eventId==0
         'MergedSimCluster_eventId', 'MergedSimCluster_bunchCrossing',
+    ],
+    "MergedCaloTruthMergedSimCluster": [
+        'MergedCaloTruthMergedSimCluster_impactPoint_eta', 'MergedCaloTruthMergedSimCluster_impactPoint_phi',
+        'MergedCaloTruthMergedSimCluster_impactPoint_x', 'MergedCaloTruthMergedSimCluster_impactPoint_y',
+        'MergedCaloTruthMergedSimCluster_impactPoint_z',
+        'MergedCaloTruthMergedSimCluster_boundaryEnergy', 'MergedCaloTruthMergedSimCluster_recEnergy',
+        'MergedCaloTruthMergedSimCluster_pdgId', 'MergedCaloTruthMergedSimCluster_trackIdAtBoundary',
+        'MergedCaloTruthMergedSimCluster_eventId', 'MergedCaloTruthMergedSimCluster_bunchCrossing',
     ],
     "SimCluster": [
         'SimCluster_impactPoint_eta', 'SimCluster_impactPoint_phi',
@@ -148,7 +159,7 @@ def process_batch(ml_files):
                 # else is pileup (either OOT via BX != 0 or in-time PU
                 # minbias via eventId != 0).
 
-                if group_name in ("SimCluster", "MergedSimCluster"):
+                if group_name in ("SimCluster", "MergedSimCluster", "MergedCaloTruthMergedSimCluster"):
                     bx_branch = f"{group_name}_bunchCrossing"
                     ev_branch = f"{group_name}_eventId"
                     is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
@@ -188,7 +199,8 @@ def main():
 
     print(f"Processing {n_files} nanoML files in {n_batches} batches of up to {batch_size}")
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
-    print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup")
+    print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
+          f"MergedCaloTruthMergedSimCluster_isPileup")
     print(f"Writing incrementally to {output_path}")
 
     parquet_writer = None

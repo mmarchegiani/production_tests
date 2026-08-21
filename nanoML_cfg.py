@@ -211,8 +211,53 @@ process.ticlTablesTask = cms.Task(
     *_tracksterTableProducers,
 )
 
+# MergedCaloTruthMergedSimCluster nano table (PR #50578 CaloTruthAccumulator
+# collection). Boundary-crossing SimTracks are
+# turned into per-CaloParticle SimClusters and merged via anti-kt(R=0.05)
+# FastJet clustering, requiring SaveCaloBoundaryInformation (pinned in
+# GSD_GUN.py). Same SimClusterCollection C++ type as mix:MergedCaloTruth, so
+# this reuses simClusterTable's variable set as-is.
+process.mergedCaloTruthMergedSimClusterTable = process.simClusterTable.clone(
+    src=cms.InputTag("mix", "MergedCaloTruthMergedSimCluster"),
+    name=cms.string("MergedCaloTruthMergedSimCluster"),
+    doc=cms.string("Boundary-track SimClusters merged per-CaloParticle via "
+                   "anti-kt(R=0.05) (requires SaveCaloBoundaryInformation)"),
+)
+
+process.hgcRecHitsToMergedCaloTruthMergedSimClusters = cms.EDProducer("SimClusterRecHitAssociationProducer",
+    caloRecHits=cms.VInputTag("hgcRecHits"),
+    simClusters=cms.InputTag("mix", "MergedCaloTruthMergedSimCluster"),
+)
+
+process.mergedCaloTruthMergedSimClusterRecEnergyTable = cms.EDProducer("SimClusterRecEnergyTableProducer",
+    src=cms.InputTag("mix", "MergedCaloTruthMergedSimCluster"),
+    cut=cms.string(""),
+    objName=cms.string("MergedCaloTruthMergedSimCluster"),
+    branchName=cms.string("recEnergy"),
+    valueMap=cms.InputTag("hgcRecHitsToMergedCaloTruthMergedSimClusters"),
+    docString=cms.string("MergedCaloTruthMergedSimCluster deposited reconstructed energy"),
+)
+
+process.hgcRecHitsToMergedCaloTruthMergedSimClusterTable = cms.EDProducer("HGCRecHitToSimClusterIndexTableProducer",
+    cut=process.hgcRecHitsTable.cut,
+    src=process.hgcRecHitsTable.src,
+    objName=process.hgcRecHitsTable.name,
+    branchName=cms.string("MergedCaloTruthMergedSimCluster"),
+    objMap=cms.InputTag("hgcRecHitsToMergedCaloTruthMergedSimClusters", "hgcRecHitsToSimClus"),
+    bestMatchTable=cms.untracked.bool(True),
+    docString=cms.string("MergedCaloTruthMergedSimCluster ordered by most sim energy in RecHit DetId"),
+)
+
+process.mergedCaloTruthMergedSimClusterTask = cms.Task(
+    process.mergedCaloTruthMergedSimClusterTable,
+    process.hgcRecHitsToMergedCaloTruthMergedSimClusters,
+    process.mergedCaloTruthMergedSimClusterRecEnergyTable,
+    process.hgcRecHitsToMergedCaloTruthMergedSimClusterTable,
+)
+
 # Path and EndPath definitions
-process.nanoAOD_step = cms.Path(process.nanoHGCMLSequence, process.ticlTablesTask)
+process.nanoAOD_step = cms.Path(process.nanoHGCMLSequence, process.ticlTablesTask,
+                                 process.mergedCaloTruthMergedSimClusterTask)
 
 process.endjob_step = cms.EndPath(process.endOfProcess)
 process.NANOAODSIMoutput_step = cms.EndPath(process.NANOAODSIMoutput)

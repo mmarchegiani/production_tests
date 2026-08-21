@@ -31,9 +31,10 @@ def parse_args():
 # Branches grouped by object family. Prefixes match the nano flat table
 # naming: e.g. "SimCluster_" branches all belong to the SimCluster object.
 #
-# Note: SimCluster_isPileup and MergedSimCluster_isPileup are derived in
-# process_batch() from the corresponding bunchCrossing/eventId branches
-# (signal iff BX==0 AND eventId==0). They are not read from disk.
+# Note: SimCluster_isPileup, MergedSimCluster_isPileup and
+# MergedCaloTruthMergedSimCluster_isPileup are derived in process_batch() from
+# the corresponding bunchCrossing/eventId branches (signal iff BX==0 AND
+# eventId==0). They are not read from disk.
 BRANCH_GROUPS = {
     "RecHitHGC": [
         'RecHitHGC_x', 'RecHitHGC_y', 'RecHitHGC_z',
@@ -44,6 +45,8 @@ BRANCH_GROUPS = {
         'RecHitHGC_MergedSimClusterBestMatchQual',
         'RecHitHGC_SimClusterBestMatchIdx',
         'RecHitHGC_SimClusterBestMatchQual',
+        'RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchIdx',
+        'RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchQual',
         # LayerCluster match (starts the RecHit->LC->Trackster->TICLCand chain)
         'RecHitHGC_LayerCluster_MatchIdx',
         'RecHitHGC_LayerClusterNumMatch',
@@ -56,6 +59,14 @@ BRANCH_GROUPS = {
         'MergedSimCluster_pdgId', 'MergedSimCluster_trackIdAtBoundary',
         # Signal/pileup discrimination: signal iff bunchCrossing==0 & eventId==0
         'MergedSimCluster_eventId', 'MergedSimCluster_bunchCrossing',
+    ],
+    "MergedCaloTruthMergedSimCluster": [
+        'MergedCaloTruthMergedSimCluster_impactPoint_eta', 'MergedCaloTruthMergedSimCluster_impactPoint_phi',
+        'MergedCaloTruthMergedSimCluster_impactPoint_x', 'MergedCaloTruthMergedSimCluster_impactPoint_y',
+        'MergedCaloTruthMergedSimCluster_impactPoint_z',
+        'MergedCaloTruthMergedSimCluster_boundaryEnergy', 'MergedCaloTruthMergedSimCluster_recEnergy',
+        'MergedCaloTruthMergedSimCluster_pdgId', 'MergedCaloTruthMergedSimCluster_trackIdAtBoundary',
+        'MergedCaloTruthMergedSimCluster_eventId', 'MergedCaloTruthMergedSimCluster_bunchCrossing',
     ],
     "SimCluster": [
         'SimCluster_impactPoint_eta', 'SimCluster_impactPoint_phi',
@@ -156,6 +167,7 @@ CAND_TRACKSTER_COLLECTION = "ticlTracksterLinks"
 ENDCAP_KEY = {
     "RecHitHGC": "RecHitHGC_z",
     "MergedSimCluster": "MergedSimCluster_impactPoint_z",
+    "MergedCaloTruthMergedSimCluster": "MergedCaloTruthMergedSimCluster_impactPoint_z",
     "SimCluster": "SimCluster_impactPoint_z",
     "LayerCluster": "LayerCluster_z",
     "TICLCand": "TICLCand_eta",
@@ -346,6 +358,8 @@ def _split_rechits(d, keep, maps, flip):
          'RecHitHGC_MergedSimClusterBestMatchQual', 'MergedSimCluster'),
         ('RecHitHGC_SimClusterBestMatchIdx',
          'RecHitHGC_SimClusterBestMatchQual', 'SimCluster'),
+        ('RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchIdx',
+         'RecHitHGC_MergedCaloTruthMergedSimClusterBestMatchQual', 'MergedCaloTruthMergedSimCluster'),
     ):
         out[idxf] = _remap(d[idxf], maps[tgt])[k]
         out[qualf] = d[qualf][k]
@@ -504,7 +518,8 @@ def build_endcap(batch, side):
         keep[grp] = (v >= 0) if side > 0 else (v < 0)
 
     maps = {grp: _index_map(keep[grp])
-            for grp in ("SimCluster", "MergedSimCluster", "LayerCluster",
+            for grp in ("SimCluster", "MergedSimCluster",
+                        "MergedCaloTruthMergedSimCluster", "LayerCluster",
                         CAND_TRACKSTER_COLLECTION)}
 
     out = {
@@ -512,6 +527,9 @@ def build_endcap(batch, side):
         "MergedSimCluster": _split_simclusters(
             batch["MergedSimCluster"], "MergedSimCluster",
             keep["MergedSimCluster"], flip),
+        "MergedCaloTruthMergedSimCluster": _split_simclusters(
+            batch["MergedCaloTruthMergedSimCluster"], "MergedCaloTruthMergedSimCluster",
+            keep["MergedCaloTruthMergedSimCluster"], flip),
         "SimCluster": _split_simclusters(
             batch["SimCluster"], "SimCluster", keep["SimCluster"], flip),
         "LayerCluster": _split_layerclusters(batch["LayerCluster"], keep, maps, flip),
@@ -544,7 +562,7 @@ def process_batch(ml_files):
                 # signal iff bunchCrossing == 0 AND eventId == 0; anything
                 # else is pileup (either OOT via BX != 0 or in-time PU
                 # minbias via eventId != 0).
-                if group_name in ("SimCluster", "MergedSimCluster"):
+                if group_name in ("SimCluster", "MergedSimCluster", "MergedCaloTruthMergedSimCluster"):
                     bx_branch = f"{group_name}_bunchCrossing"
                     ev_branch = f"{group_name}_eventId"
                     is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
@@ -584,7 +602,8 @@ def main():
 
     print(f"Processing {n_files} nanoML files in {n_batches} batches of up to {batch_size}")
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
-    print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup")
+    print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
+          f"MergedCaloTruthMergedSimCluster_isPileup")
     print(f"Endcap split: 2 output events per input event "
           f"(-z endcap mirrored via z->-z, eta->-eta)")
     print(f"Candidate links assumed to point into: {CAND_TRACKSTER_COLLECTION}")

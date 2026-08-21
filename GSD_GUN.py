@@ -45,6 +45,23 @@ else:
 
 process.maxEvents.input = cms.untracked.int32(options.maxEvents)
 
+# MergedCaloTruthMergedSimCluster (PR #50578 CaloTruthAccumulator collections).
+# Both flags already default to True in
+# SimGeneral/MixingModule/python/caloTruthProducer_cfi.py, and
+# SaveCaloBoundaryInformation is already forced True for all Phase-2 workflows
+# by the phase2_hgcal era modifier (SimG4Core/Application/python/g4SimHits_cfi.py).
+# Pinned explicitly here so production doesn't silently lose this collection if
+# an upstream default changes.
+process.mix.digitizers.calotruth.produceLegacySimCluster = cms.bool(True)
+process.mix.digitizers.calotruth.produceBoundaryAndMergedSimCluster = cms.bool(True)
+process.g4SimHits.TrackingAction.SaveCaloBoundaryInformation = cms.bool(True)
+
+# Retain the new mix:MergedCaloTruth* SimCluster/CaloParticle instances
+# (MergedCaloTruthBoundaryTrackSimCluster, MergedCaloTruthMergedSimCluster,
+# MergedCaloTruthCaloParticle) through to the GSD output. Already covered by
+# the standard phase2_hgcal event content wildcard; kept explicit here too.
+process.FEVTDEBUGoutput.outputCommands.append("keep *_mix_MergedCaloTruth*_*")
+
 seed = int(options.seed) + 1
 # random seeds
 process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(seed)

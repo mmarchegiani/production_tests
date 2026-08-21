@@ -82,6 +82,7 @@ process.FEVTDEBUGoutput.outputCommands.extend(["keep *_MergedTrackTruth_*_*",
     "keep *_muons*_*_*",
     "keep *_simTrack*_*_*",
     "keep *_simHit*_*_*",
+    "keep *_mix_MergedCaloTruth*_*",
 ])
 
 process.options.numberOfThreads=cms.untracked.uint32(options.nThreads)

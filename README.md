@@ -39,11 +39,11 @@ full HGCAL truth chain, TICL reconstruction, and their associations.
 
 `GSD_GUN.py` fires a configurable particle gun into HGCAL and runs
 GEN + SIM + DIGI. Before running, edit the file to set particle IDs,
-energy range, and eta range. `useFineCalo=1` (default) enables the
+energy range, and eta range. `useFineCalo=1` (default is 0) enables the
 fineCalo boundary-crossing SimCluster/CaloParticle producer.
 
 ```shell
-cmsRun GSD_GUN.py seed=1 outputFile=testGSD.root
+cmsRun GSD_GUN.py seed=1 outputFile=testGSD.root useFineCalo=1
 ```
 
 Options:
@@ -68,7 +68,7 @@ cmsRun MINBIAS_GENSIM.py seed=42 maxEvents=200 outputFile=pileup_gensim.root
 
 # Step 2: GSD with PU mixing. pileup=N sets the average, pu=<file>
 # points to the minbias library from step 1.
-cmsRun GSD_GUN.py seed=1 particle=22 energy=100 pileup=30 \
+cmsRun GSD_GUN.py seed=1 particle=22 energy=100 pileup=30 useFineCalo=1 \
     pu=pileup_gensim.root outputFile=testGSD.root
 ```
 
