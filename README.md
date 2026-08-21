@@ -219,11 +219,12 @@ CMSSW is not at `$HOME/CMSSW_20_0_0_pre1`, pass
 [`root_to_parquet.py`](root_to_parquet.py) flattens nanoML ROOT files
 into a single parquet file for ML training. Collections are grouped
 by object family (`RecHitHGC`, `LayerCluster`, `SimCluster`,
-`MergedSimCluster`, `TICLCand`, `Candidate2Tracksters`, and each
-trackster iteration).
+`MergedSimCluster`, `MergedCaloTruthMergedSimCluster`, `TICLCand`,
+`Candidate2Tracksters`, and each trackster iteration).
 
-Two derived boolean fields are added:
-`SimCluster_isPileup` and `MergedSimCluster_isPileup`, computed as
+Three derived boolean fields are added: `SimCluster_isPileup`,
+`MergedSimCluster_isPileup`, and
+`MergedCaloTruthMergedSimCluster_isPileup`, computed as
 `~((bunchCrossing == 0) & (eventId == 0))`.
 
 ```shell
@@ -231,4 +232,37 @@ python3 root_to_parquet.py \
     --nanoMLfiles /path/to/nanoML1.root /path/to/nanoML2.root \
     --outputDir parquet_out \
     --outputFile mydata.parquet
+```
+
+## One-shot pipeline scripts
+
+For a quick single-particle-type campaign, [`scripts/`](scripts/)
+contains ready-made scripts that run all four steps above
+(GSD → RECO → nanoML → parquet) in one command, with `useFineCalo=1`
+and no pileup (`pileup=0`):
+
+- [`scripts/generate_taus_FineCalo.sh`](scripts/generate_taus_FineCalo.sh) — tau gun (`particle=15`)
+- [`scripts/generate_photons_FineCalo.sh`](scripts/generate_photons_FineCalo.sh) — photon gun (`particle=22`)
+
+Both take the output directory and (optionally) the number of events
+to generate; `cmsenv` must already be sourced.
+
+```shell
+# Usage: bash <script> <output_directory> [n_events]   (n_events defaults to 1000)
+bash scripts/generate_taus_FineCalo.sh /path/to/output/folder 1000
+bash scripts/generate_photons_FineCalo.sh /path/to/output/folder 1000
+```
+
+Each run writes `<partname>_GSD.root`, `<partname>_RECO.root`,
+`<partname>_nanoML.root`, and `<partname>.parquet` into the output
+directory, printing `❌ ...` and exiting with status 1 if any step
+fails.
+
+The parquet conversion step needs `uproot`/`awkward`/`pyarrow`, which
+the CMSSW python from `cmsenv` does not provide. The scripts default
+to plain `python3` for that step; if yours doesn't have those
+packages, point at one that does:
+
+```shell
+export PARQUET_PYTHON=/path/to/conda/envs/<env>/bin/python3
 ```
