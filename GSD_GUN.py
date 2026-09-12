@@ -24,6 +24,10 @@ options.register("particle", 22, VarParsing.multiplicity.singleton, VarParsing.v
     "pdgId of the particle to shoot (22=photon, 11=electron, 211=pi+, 130=K0L, 15=tau, ...)")
 options.register("energy", 100.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
     "gun energy in GeV (fixed; MinE=MaxE=energy)")
+options.register("minE", 20.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "gun minimum energy in GeV")
+options.register("maxE", 200.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "gun maximum energy in GeV")
 options.register("pu", "", VarParsing.multiplicity.singleton, VarParsing.varType.string,
     "path to a minbias GEN-SIM file to mix as pileup (from MINBIAS_GENSIM.py); "
     "required when pileup>0.")
@@ -96,14 +100,14 @@ process.generator = cms.EDProducer("edm::FlatEtaRangeGunProducer",
         # randomly shoot [1, nParticles] particles, each time randomly drawn
         randomShoot=cms.bool(False),
         # energy range (fixed; MinE=MaxE=options.energy)
-        MinE=cms.double(float(options.energy)),
-        MaxE=cms.double(float(options.energy)),
+        MinE=cms.double(float(options.minE)),
+        MaxE=cms.double(float(options.maxE)),
         # phi range
         MinPhi=cms.double(-math.pi),
         MaxPhi=cms.double(math.pi),
         # eta range
-        MinEta=cms.double(1.7),
-        MaxEta=cms.double(2.7),
+        MinEta=cms.double(1.5),
+        MaxEta=cms.double(3.0),
     ),
     AddAntiParticle=cms.bool(False),
     debug=cms.untracked.bool(True),

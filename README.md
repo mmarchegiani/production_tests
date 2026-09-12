@@ -237,26 +237,67 @@ python3 root_to_parquet.py \
 ## One-shot pipeline scripts
 
 For a quick single-particle-type campaign, [`scripts/`](scripts/)
-contains ready-made scripts that run all four steps above
-(GSD → RECO → nanoML → parquet) in one command, with `useFineCalo=1`
-and no pileup (`pileup=0`):
+contains ready-made scripts that run the whole chain
+(optional MINBIAS → GSD → RECO → nanoML → parquet) in one command on a
+single machine. There is one script per (particle, calo-truth
+configuration) combination:
 
-- [`scripts/generate_taus_FineCalo.sh`](scripts/generate_taus_FineCalo.sh) — tau gun (`particle=15`)
-- [`scripts/generate_photons_FineCalo.sh`](scripts/generate_photons_FineCalo.sh) — photon gun (`particle=22`)
+|                | `useFineCalo=1`                                                                          | `useFineCalo=0`                                                                              |
+| -------------- | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| tau (`15`)     | [`generate_taus_FineCalo.sh`](scripts/generate_taus_FineCalo.sh)                           | [`generate_taus_noFineCalo.sh`](scripts/generate_taus_noFineCalo.sh)                           |
+| photon (`22`)  | [`generate_photons_FineCalo.sh`](scripts/generate_photons_FineCalo.sh)                     | [`generate_photons_noFineCalo.sh`](scripts/generate_photons_noFineCalo.sh)                     |
 
-Both take the output directory and (optionally) the number of events
-to generate; `cmsenv` must already be sourced.
+All four are thin wrappers around the shared driver
+[`scripts/chain_common.sh`](scripts/chain_common.sh), which holds the
+actual chain logic (argument parsing, step sequencing, logging, error
+handling). `chain_common.sh` is sourced, not executed directly.
+
+The `FineCalo` variants import `GSDfineCalo_fragment` (fine calorimeter
+segmentation); the `noFineCalo` variants use `GSD_fragment` /
+`GSD_fragment_PU` and are the **only** ones that support pileup, since
+the fine-calo fragment has no PU-mixing wiring.
+
+`cmsenv` must already be sourced. Defaults: 1000 events, `seed=1`,
+gun energy flat in 20–200 GeV, `pileup=0`, 1 thread.
 
 ```shell
-# Usage: bash <script> <output_directory> [n_events]   (n_events defaults to 1000)
-bash scripts/generate_taus_FineCalo.sh /path/to/output/folder 1000
-bash scripts/generate_photons_FineCalo.sh /path/to/output/folder 1000
+# Usage: bash <script> <output_directory> [n_events] [options]
+bash scripts/generate_taus_FineCalo.sh      /path/to/output/folder 1000
+bash scripts/generate_photons_FineCalo.sh   /path/to/output/folder 1000
+bash scripts/generate_taus_noFineCalo.sh    /path/to/output/folder 1000
+bash scripts/generate_photons_noFineCalo.sh /path/to/output/folder 1000
+
+# With pileup: the minbias library is generated automatically with
+# MINBIAS_GENSIM.py (seed = signal seed + 500000), unless --pu is given.
+bash scripts/generate_photons_noFineCalo.sh /path/to/out 500 --pileup 140 --nminbias 500
+
+# Anything else: --help lists every option
+bash scripts/generate_taus_FineCalo.sh --help
 ```
 
-Each run writes `<partname>_GSD.root`, `<partname>_RECO.root`,
-`<partname>_nanoML.root`, and `<partname>.parquet` into the output
-directory, printing `❌ ...` and exiting with status 1 if any step
-fails.
+Options (all optional, after the two positional arguments):
+
+| Option | Meaning |
+| ------ | ------- |
+| `--seed N` | random seed for the GSD step (default `1`) |
+| `--minE X` / `--maxE X` | gun energy range in GeV (defaults `20.0` / `200.0`) |
+| `--nthreads N` | threads per `cmsRun` step (default `1`) |
+| `--pileup N` | average pileup (default `0`); `noFineCalo` scripts only |
+| `--pu FILE` | mix an existing minbias GEN-SIM file instead of generating one |
+| `--nminbias N` | events for the auto-generated minbias library (default: `n_events`) |
+| `--run-pftruth` | enable the nanoML PFTruth sequence (broken with pileup) |
+| `--split` | use `root_to_parquet-split.py` (one row per HGCAL endcap) |
+| `--no-parquet` | stop after the nanoML step |
+| `--resume` | skip any step whose output file already exists |
+| `--dry-run` | print the commands that would run, execute nothing |
+
+Each run writes `<tag>_GSD.root`, `<tag>_RECO.root`, `<tag>_DQM.root`,
+`<tag>_nanoML.root` and `<tag>.parquet` into the output directory
+(plus `<tag>_MINBIAS.root` when pileup is generated), where `<tag>` is
+`<partname>_{fineCalo,stdCalo}[_PU<N>]` — so the four configurations can
+safely share one output directory. Per-step logs go to
+`<output_directory>/logs/`. Any failing step prints `❌ ...`, names its
+log file, and exits with status 1 without running the remaining steps.
 
 The parquet conversion step needs `uproot`/`awkward`/`pyarrow`, which
 the CMSSW python from `cmsenv` does not provide. The scripts default
