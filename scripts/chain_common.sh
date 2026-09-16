@@ -53,19 +53,73 @@ ${pu_note}
   -h, --help             show this help
 
 Environment:
-  PARQUET_PYTHON         python3 with uproot/awkward/pyarrow for the parquet step
-                         (the CMSSW python from cmsenv does not have these).
-                         Default: python3
-                         e.g. export PARQUET_PYTHON=/path/to/conda/envs/<env>/bin/python3
+  PARQUET_IMAGE          apptainer image used to run the parquet step (the CMSSW
+                         python from cmsenv has no pyarrow). The script binds
+                         /afs, /cvmfs, /tmp, /eos/cms, /eos/user/<u>/\$USER, the repo and
+                         the output directory, and forwards the kerberos ticket.
+                         Default: ${DEFAULT_PARQUET_IMAGE}
+  PARQUET_PYTHON         if set, run the parquet step directly with this python3
+                         (no container), e.g. a conda env with uproot/awkward/pyarrow
 
 Example:
-  $CHAIN_SCRIPT_NAME /eos/user/\$USER/${PARTNAME}_sample 2000 --seed 7 --nthreads 4
+  $CHAIN_SCRIPT_NAME /eos/user/<u>/\$USER/${PARTNAME}_sample 2000 --seed 7 --nthreads 4
 EOF
 }
 
 chain_die() {
     echo "❌ $*" >&2
     exit 1
+}
+
+# Container with the python stack for root_to_parquet*.py (uproot, awkward,
+# pyarrow). cmsenv's python has uproot/awkward but no pyarrow.
+DEFAULT_PARQUET_IMAGE="/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/cms-cmu/hgcal-ml4reco/hgcal-offline-reco:3.12-latest"
+
+# chain_bind_args <dir>...  -> prints "-B <dir>" pairs (one token per line) for
+# the directories that exist, skipping duplicates and paths nested inside an
+# earlier one (apptainer would otherwise mount them twice). Symlinked paths
+# (e.g. /eos/user/m/<user> -> /eos/home-m/<user>) are bound under both names so
+# that either spelling works inside the container.
+chain_bind_args() {
+    local -a bound=()
+    local d r cand b nested
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        r=$(realpath "$d")
+        for cand in "$d" "$r"; do
+            nested=0
+            for b in "${bound[@]}"; do
+                case "$cand/" in "$b"/*) nested=1 ;; esac
+            done
+            [ "$nested" -eq 1 ] && continue
+            bound+=("$cand")
+            printf -- '-B\n%s\n' "$cand"
+        done
+    done
+}
+
+# chain_parquet_cmd -> fills the global array PARQUET_CMD with the interpreter
+# prefix for the parquet step: either $PARQUET_PYTHON, or python3 inside the
+# apptainer image $PARQUET_IMAGE.
+chain_parquet_cmd() {
+    PARQUET_CMD=()
+    if [ -n "${PARQUET_PYTHON:-}" ]; then
+        PARQUET_CMD=("$PARQUET_PYTHON")
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 0 ] && ! command -v apptainer >/dev/null 2>&1; then
+        chain_die "apptainer not found in PATH (needed for the parquet step). Install it or set PARQUET_PYTHON to a python3 with uproot/awkward/pyarrow."
+    fi
+    # --cleanenv: keep cmsenv's PYTHONPATH/LD_LIBRARY_PATH/PYTHONHOME out of the image.
+    PARQUET_CMD=(apptainer exec --cleanenv)
+    local -a binds
+    mapfile -t binds < <(chain_bind_args /afs /cvmfs /tmp /eos/cms "/eos/user/${USER:0:1}/${USER}" "$REPO_DIR" "$OUTPUT_DIR")
+    PARQUET_CMD+=("${binds[@]}")
+    # kerberos ticket so EOS (fuse) paths work from inside the container
+    if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        PARQUET_CMD+=(-B "$XDG_RUNTIME_DIR" --env "KRB5CCNAME=${KRB5CCNAME:-FILE:${XDG_RUNTIME_DIR}/krb5cc}")
+    fi
+    PARQUET_CMD+=("$PARQUET_IMAGE" python3)
 }
 
 # run_step <description> <logfile> <command...>
@@ -115,7 +169,7 @@ run_chain() {
     local RUN_PFTRUTH=0 DO_PARQUET=1 SPLIT=0
     RESUME=0
     DRY_RUN=0
-    local PARQUET_PY="${PARQUET_PYTHON:-python3}"
+    local PARQUET_IMAGE="${PARQUET_IMAGE:-$DEFAULT_PARQUET_IMAGE}"
 
     # ---- argument parsing ----------------------------------------------
     local positional=()
@@ -211,6 +265,11 @@ run_chain() {
     echo "  runPFTruth    : $RUN_PFTRUTH"
     if [ "$DO_PARQUET" -eq 1 ]; then
         echo "  parquet       : $PARQUET_SCRIPT -> $PARQUET_NAME"
+        if [ -n "${PARQUET_PYTHON:-}" ]; then
+            echo "  parquet python: $PARQUET_PYTHON"
+        else
+            echo "  parquet image : $PARQUET_IMAGE (apptainer)"
+        fi
     else
         echo "  parquet       : disabled (--no-parquet)"
     fi
@@ -275,11 +334,13 @@ run_chain() {
     fi
 
     # ---- step 5: parquet --------------------------------------------------
+    # Runs inside the hgcal-ml4reco apptainer image (or with $PARQUET_PYTHON).
     if [ "$DO_PARQUET" -eq 1 ]; then
         if ! chain_skip "parquet step" "$OUTPUT_DIR/$PARQUET_NAME"; then
+            chain_parquet_cmd
             chain_run_step "Converting to parquet ($PARQUET_SCRIPT)" \
                 "$LOG_DIR/${TAG}_parquet.log" \
-                "$PARQUET_PY" "$REPO_DIR/$PARQUET_SCRIPT" \
+                "${PARQUET_CMD[@]}" "$REPO_DIR/$PARQUET_SCRIPT" \
                     --nanoMLfiles "$NANO_FILE" \
                     --outputDir "$OUTPUT_DIR" \
                     --outputFile "$PARQUET_NAME"

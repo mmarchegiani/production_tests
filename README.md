@@ -267,6 +267,15 @@ the fine-calo fragment has no PU-mixing wiring.
 `cmsenv` must already be sourced. Defaults: 1000 events, `seed=1`,
 gun energy flat in 20–200 GeV, `pileup=0`, 1 thread.
 
+The parquet step does not use the CMSSW python (it has no `pyarrow`):
+it runs `python3 root_to_parquet*.py` with `apptainer exec` inside the
+`hgcal-offline-reco:3.12-latest` image from
+`/cvmfs/unpacked.cern.ch/gitlab-registry.cern.ch/cms-cmu/hgcal-ml4reco/`,
+binding `/afs`, `/cvmfs`, `/tmp`, `/eos/cms`, `/eos/user/<u>/$USER`, the repo
+and the output directory and forwarding the kerberos ticket. Override the
+image with `PARQUET_IMAGE=/path/to/image`, or bypass the container with
+`PARQUET_PYTHON=/path/to/python3` (any python with uproot/awkward/pyarrow).
+
 ```shell
 # Usage: bash <script> <output_directory> [n_events] [options]
 bash scripts/generate_taus_FineCalo.sh      /path/to/output/folder 1000
