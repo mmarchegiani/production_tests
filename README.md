@@ -220,12 +220,19 @@ CMSSW is not at `$HOME/CMSSW_20_0_0_pre1`, pass
 into a single parquet file for ML training. Collections are grouped
 by object family (`RecHitHGC`, `LayerCluster`, `SimCluster`,
 `MergedSimCluster`, `MergedCaloTruthMergedSimCluster`, `TICLCand`,
-`Candidate2Tracksters`, and each trackster iteration).
+`Candidate2Tracksters`, each trackster iteration, the MC-truth
+tracksters `ticlSimTracksters` / `ticlSimTrackstersFromCPs`, the sim
+candidates `SimTICLCand` / `SimCandidate2Tracksters`, and the reco↔sim
+trackster association tables such as `CLUE3DHighToSimTSByHits`).
 
-Three derived boolean fields are added: `SimCluster_isPileup`,
-`MergedSimCluster_isPileup`, and
+Derived boolean fields are added: `SimCluster_isPileup`,
+`MergedSimCluster_isPileup` and
 `MergedCaloTruthMergedSimCluster_isPileup`, computed as
-`~((bunchCrossing == 0) & (eventId == 0))`.
+`~((bunchCrossing == 0) & (eventId == 0))`, plus
+`ticlSimTracksters_seedIsCaloParticle` /
+`ticlSimTrackstersFromCPs_seedIsCaloParticle`, telling whether a
+SimTrackster's `seedIndex` points into the `CaloPart` table (true) or
+into the `SimCluster` table (false).
 
 ```shell
 python3 root_to_parquet.py \

@@ -152,6 +152,115 @@ BRANCH_GROUPS = {
 }
 
 # ---------------------------------------------------------------------------
+# MC-truth tracksters and reco<->sim associations (see nanoML_cfg.py)
+# ---------------------------------------------------------------------------
+
+# ticlSimTracksters: one SimTrackster per SimCluster, or per CaloParticle when
+# its G4 track crossed the calo boundary. ticlSimTrackstersFromCPs: one per
+# CaloParticle. `seedIndex` is the row of the seed in the SimCluster table
+# (SimCluster seed) or in the CaloPart table (CaloParticle seed); which one is
+# encoded in the derived <grp>_seedIsCaloParticle flag (see
+# _derive_sim_trackster_flags). The boundary*/simTime/genPt/mass
+# branches describe the seed at the calo boundary.
+# NB: boundaryPhi is filled with the boundary eta upstream
+# (SimTracksterTableProducer bug); use boundaryPx/Py for the azimuth.
+SIM_TRACKSTER_GROUPS = ("ticlSimTracksters", "ticlSimTrackstersFromCPs")
+
+
+def _sim_trackster_branches(grp):
+    return [
+        f'{grp}_raw_energy', f'{grp}_raw_em_energy',
+        f'{grp}_raw_pt', f'{grp}_regressed_energy',
+        f'{grp}_barycenter_x', f'{grp}_barycenter_y', f'{grp}_barycenter_z',
+        f'{grp}_barycenter_eta', f'{grp}_barycenter_phi',
+        f'{grp}_time', f'{grp}_timeError', f'{grp}_boundaryTime',
+        # seed (SimCluster or CaloParticle) the SimTrackster was built from
+        f'{grp}_seedIndex', f'{grp}_seedProductId',
+        # seed properties at the calo boundary (extension table)
+        f'{grp}_boundaryX', f'{grp}_boundaryY', f'{grp}_boundaryZ',
+        f'{grp}_boundaryEta', f'{grp}_boundaryPhi',
+        f'{grp}_boundaryPx', f'{grp}_boundaryPy', f'{grp}_boundaryPz',
+        # (simEnergy is computed upstream but not written to the table)
+        f'{grp}_simTime', f'{grp}_genPt', f'{grp}_mass',
+        # LayerCluster links (LC index + energy fraction, flat over tracksters)
+        f'{grp}_n{grp}vertices', f'{grp}_o{grp}vertices',
+        f'{grp}vertices_vertices', f'{grp}vertices_vertex_mult',
+    ]
+
+
+for _grp in SIM_TRACKSTER_GROUPS:
+    BRANCH_GROUPS[_grp] = _sim_trackster_branches(_grp)
+
+# Sim TICLCandidates: rows parallel to ticlSimTrackstersFromCPs;
+# SimCandidate2TrackstersIndices_tracksterIndex points into ticlSimTracksters.
+BRANCH_GROUPS["SimTICLCand"] = [
+    'SimTICLCand_pt', 'SimTICLCand_p', 'SimTICLCand_energy', 'SimTICLCand_raw_energy',
+    'SimTICLCand_eta', 'SimTICLCand_phi', 'SimTICLCand_mass',
+    'SimTICLCand_pdgID', 'SimTICLCand_charge',
+    'SimTICLCand_time', 'SimTICLCand_timeError',
+]
+BRANCH_GROUPS["SimCandidate2Tracksters"] = [
+    'nSimCandidate2Tracksters',
+    'nSimCandidate2TrackstersIndices',
+    'SimCandidate2TrackstersIndices_tracksterIndex',
+    'SimCandidate2Tracksters_nSimCandidate2TrackstersIndices',
+    'SimCandidate2Tracksters_oSimCandidate2TrackstersIndices',
+]
+
+# Reco <-> Sim trackster association tables, e.g. CLUE3DHighToSimTSByHits
+# (rows parallel to ticlTrackstersCLUE3DHigh, links point into
+# ticlSimTracksters) and SimTSToCLUE3DHighByHits (the reverse). Each has
+# per-row count/offset branches and a flat "...Links" table with the linked
+# index, sharedEnergy and score (lower is better).
+SIM_ASSOC_RECO = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links"}
+SIM_ASSOC_SIM = {"ticlSimTracksters": "SimTS", "ticlSimTrackstersFromCPs": "SimTSCP"}
+SIM_ASSOC_TYPES = ("ByHits", "ByLCs")
+
+# table name -> (source group, target group)
+SIM_ASSOC_TABLES = {}
+for _reco_grp, _reco_short in SIM_ASSOC_RECO.items():
+    for _sim_grp, _sim_short in SIM_ASSOC_SIM.items():
+        for _type in SIM_ASSOC_TYPES:
+            SIM_ASSOC_TABLES[f"{_reco_short}To{_sim_short}{_type}"] = (_reco_grp, _sim_grp)
+            SIM_ASSOC_TABLES[f"{_sim_short}To{_reco_short}{_type}"] = (_sim_grp, _reco_grp)
+
+
+def _assoc_branches(name):
+    return [
+        f'n{name}',
+        f'{name}_n{name}Links', f'{name}_o{name}Links',
+        f'n{name}Links',
+        f'{name}Links_index', f'{name}Links_sharedEnergy', f'{name}Links_score',
+    ]
+
+
+for _name in SIM_ASSOC_TABLES:
+    BRANCH_GROUPS[_name] = _assoc_branches(_name)
+
+
+def _derive_sim_trackster_flags(per_file):
+    """Add <grp>_seedIsCaloParticle to the SimTrackster groups of one file.
+
+    All ticlSimTrackstersFromCPs entries are CaloParticle-seeded, so a
+    SimTrackster is CaloParticle-seeded iff its seedProductId equals the
+    fromCPs one in the same event; otherwise seedIndex points into the
+    SimCluster table. No-op for files without the SimTrackster tables."""
+    ref_grp = "ticlSimTrackstersFromCPs"
+    ref = per_file.get(ref_grp)
+    if ref is None or f"{ref_grp}_seedProductId" not in ref.fields:
+        return
+    # per-event ProductID of the CaloParticle collection; 0 (an invalid
+    # ProductID, never matches) when the event has no CaloParticles. Filling
+    # here keeps the comparison below a plain `var * bool` (no option/union
+    # types, which pyarrow cannot write to parquet).
+    cp_pid = ak.fill_none(ak.firsts(ref[f"{ref_grp}_seedProductId"]), 0)
+    for grp in SIM_TRACKSTER_GROUPS:
+        data = per_file.get(grp)
+        if data is None or f"{grp}_seedProductId" not in data.fields:
+            continue
+        data[f"{grp}_seedIsCaloParticle"] = data[f"{grp}_seedProductId"] == cp_pid
+
+# ---------------------------------------------------------------------------
 # Endcap split configuration
 # ---------------------------------------------------------------------------
 
@@ -174,7 +283,20 @@ ENDCAP_KEY = {
     "ticlTrackstersCLUE3DHigh": "ticlTrackstersCLUE3DHigh_barycenter_z",
     "ticlTracksterLinks": "ticlTracksterLinks_barycenter_z",
     "ticlTrackstersRecovery": "ticlTrackstersRecovery_barycenter_z",
+    # SimTracksters: side of the seed at the calo boundary (defined even when
+    # all of the SimTrackster's layer clusters were filtered away); falls back
+    # to the barycenter (ENDCAP_KEY_FALLBACK) when the seed never reached the
+    # boundary and boundaryZ is exactly 0.
+    "ticlSimTracksters": "ticlSimTracksters_boundaryZ",
+    "ticlSimTrackstersFromCPs": "ticlSimTrackstersFromCPs_boundaryZ",
 }
+ENDCAP_KEY_FALLBACK = {
+    "ticlSimTracksters": "ticlSimTracksters_barycenter_z",
+    "ticlSimTrackstersFromCPs": "ticlSimTrackstersFromCPs_barycenter_z",
+}
+# SimTICLCand (and SimCandidate2Tracksters) rows are parallel to
+# ticlSimTrackstersFromCPs and reuse its mask. The association tables reuse the
+# mask of their source collection (SIM_ASSOC_TABLES).
 
 # Flip convention for the negative endcap: reflection through the z=0 plane,
 # i.e. z -> -z and eta -> -eta, while x, y, phi are left untouched. Note this
@@ -201,6 +323,18 @@ def _exclusive_prefix_sum(jagged):
     starts = np.minimum(starts, flat.size - 1)  # guard trailing empty events
     base = np.repeat(cs[starts], counts)
     return ak.unflatten(cs - base, counts)
+
+
+def _regroup(flat, counts):
+    """Regroup a depth-2 flat table (events x entries) into depth-3
+    (events x rows x entries) from the depth-2 per-row `counts`.
+
+    Unlike ak.unflatten(flat, ak.flatten(counts), axis=1) this is
+    unambiguous when some rows have 0 entries (e.g. a TICLCand without
+    linked tracksters): axis=1 unflattening cannot tell which event a
+    zero-count row belongs to and silently mis-assigns rows."""
+    rows = ak.unflatten(ak.flatten(flat), ak.flatten(counts))
+    return ak.unflatten(rows, ak.num(counts))
 
 
 def _index_map(keep):
@@ -419,35 +553,37 @@ def _split_layerclusters(d, keep, maps, flip):
     return out
 
 
-def _split_ticlcands(d, k, flip):
+def _split_ticlcands(d, k, flip, prefix="TICLCand"):
     out = {f: d[f][k] for f in d.fields}
     if flip:
-        out['TICLCand_eta'] = -out['TICLCand_eta']
+        out[f'{prefix}_eta'] = -out[f'{prefix}_eta']
     return out
 
 
-def _split_candidates(d, keep_cand, t_map):
-    """Split the TICLCand -> trackster link table. Rows are parallel to
-    TICLCand, so the TICLCand endcap mask is reused; trackster indices are
-    remapped into the split CAND_TRACKSTER_COLLECTION."""
-    idx_flat = d['Candidate2TrackstersIndices_tracksterIndex']
-    remapped = _remap(idx_flat, t_map)
+def _split_candidates(d, keep_cand, t_map, prefix="Candidate2Tracksters"):
+    """Split a TICLCand -> trackster link table (reco: Candidate2Tracksters,
+    sim: SimCandidate2Tracksters). Rows are parallel to the candidate table,
+    so the candidate endcap mask is reused; trackster indices are remapped
+    into the split target trackster collection (t_map)."""
+    idx_b = f'{prefix}Indices_tracksterIndex'
+    cnt_b = f'{prefix}_n{prefix}Indices'
+    off_b = f'{prefix}_o{prefix}Indices'
 
-    cnt_b = 'Candidate2Tracksters_nCandidate2TrackstersIndices'
-    off_b = 'Candidate2Tracksters_oCandidate2TrackstersIndices'
+    idx_flat = d[idx_b]
+    remapped = _remap(idx_flat, t_map)
     have_counts = cnt_b in d.fields
 
     if have_counts:
-        nested = ak.unflatten(remapped, ak.flatten(d[cnt_b]), axis=1)
+        nested = _regroup(remapped, d[cnt_b])
     else:
         # Fallback: assume exactly one linked trackster per candidate.
         if not ak.all(ak.num(idx_flat) == ak.num(keep_cand)):
             raise RuntimeError(
-                "Candidate2Tracksters: per-candidate count branch "
+                f"{prefix}: per-candidate count branch "
                 f"'{cnt_b}' not found and the flat index table is not 1-to-1 "
-                "with TICLCand, so links cannot be regrouped per candidate. "
+                "with the candidates, so links cannot be regrouped per candidate. "
                 "Check tree.keys() for the actual count/offset branch names "
-                "and add them to BRANCH_GROUPS['Candidate2Tracksters'].")
+                f"and add them to BRANCH_GROUPS['{prefix}'].")
         nested = ak.unflatten(remapped, 1, axis=1)
 
     nested = nested[keep_cand]
@@ -457,10 +593,9 @@ def _split_candidates(d, keep_cand, t_map):
     nested = nested[good]
 
     out = {}
-    out['nCandidate2Tracksters'] = ak.num(nested)
-    out['Candidate2TrackstersIndices_tracksterIndex'] = ak.flatten(nested, axis=2)
-    out['nCandidate2TrackstersIndices'] = ak.num(
-        out['Candidate2TrackstersIndices_tracksterIndex'])
+    out[f'n{prefix}'] = ak.num(nested)
+    out[idx_b] = ak.flatten(nested, axis=2)
+    out[f'n{prefix}Indices'] = ak.num(out[idx_b])
     if have_counts:
         new_counts = ak.num(nested, axis=2)
         out[cnt_b] = new_counts
@@ -477,9 +612,8 @@ def _split_tracksters(d, grp, keep_t, lc_map, flip):
 
     # Regroup the flat vertices tables per trackster, remap LC indices into
     # the split LayerCluster collection, then filter tracksters by endcap.
-    fc = ak.flatten(d[cnt_name])
-    verts = ak.unflatten(_remap(d[v_name], lc_map), fc, axis=1)[keep_t]
-    mult = ak.unflatten(d[m_name], fc, axis=1)[keep_t]
+    verts = _regroup(_remap(d[v_name], lc_map), d[cnt_name])[keep_t]
+    mult = _regroup(d[m_name], d[cnt_name])[keep_t]
 
     # Safety net: drop constituent LCs assigned to the removed endcap
     # (tracksters are built per-endcap so this should never fire).
@@ -502,6 +636,63 @@ def _split_tracksters(d, grp, keep_t, lc_map, flip):
     return out
 
 
+def _split_simtracksters(d, grp, keep_t, lc_map, sc_map, flip):
+    """SimTrackster tables: same as _split_tracksters (LC links remapped,
+    endcap filter, barycenter mirrored) plus the seed index and the seed's
+    boundary quantities.
+
+    seedIndex is remapped into the split SimCluster collection when the seed
+    is a SimCluster (seedIsCaloParticle == False). CaloParticle seeds keep the
+    ORIGINAL CaloPart index, as CaloParticles are not stored in the parquet.
+    """
+    out = _split_tracksters(d, grp, keep_t, lc_map, flip)
+    seed_b, flag_b = f"{grp}_seedIndex", f"{grp}_seedIsCaloParticle"
+    if seed_b in d.fields and flag_b in d.fields:
+        seed = d[seed_b]
+        out[seed_b] = ak.where(d[flag_b], seed, _remap(seed, sc_map))[keep_t]
+    if flip:
+        # z-reflection: position z, eta and momentum z of the seed flip sign
+        # (boundaryPhi is left alone: upstream it holds the eta value anyway)
+        for f in (f"{grp}_boundaryZ", f"{grp}_boundaryEta", f"{grp}_boundaryPz"):
+            if f in out:
+                out[f] = -out[f]
+    return out
+
+
+def _split_assoc(d, name, keep_src, target_map):
+    """Split a one-to-many trackster association table (SIM_ASSOC_TABLES).
+
+    Rows are parallel to the source trackster collection, whose endcap mask is
+    reused; the linked indices are remapped into the split target collection
+    and links into the removed endcap are dropped. Count/offset branches are
+    recomputed."""
+    cnt_b, off_b = f"{name}_n{name}Links", f"{name}_o{name}Links"
+    idx_b, e_b, s_b = (f"{name}Links_index", f"{name}Links_sharedEnergy",
+                       f"{name}Links_score")
+
+    idx = _regroup(_remap(d[idx_b], target_map), d[cnt_b])[keep_src]
+    energy = _regroup(d[e_b], d[cnt_b])[keep_src]
+    score = _regroup(d[s_b], d[cnt_b])[keep_src]
+
+    good = idx >= 0
+    idx, energy, score = idx[good], energy[good], score[good]
+
+    out = {}
+    out[f"n{name}"] = ak.num(idx)
+    out[cnt_b] = ak.num(idx, axis=2)
+    out[off_b] = _exclusive_prefix_sum(out[cnt_b])
+    out[idx_b] = ak.flatten(idx, axis=2)
+    out[e_b] = ak.flatten(energy, axis=2)
+    out[s_b] = ak.flatten(score, axis=2)
+    out[f"n{name}Links"] = ak.num(out[idx_b])
+    return out
+
+
+def _present(batch, grp, field):
+    """True if the (optional) collection `grp` was read with branch `field`."""
+    return grp in batch and field in batch[grp].fields
+
+
 def build_endcap(batch, side):
     """Build one endcap's worth of events from the full batch.
 
@@ -514,13 +705,21 @@ def build_endcap(batch, side):
 
     keep = {}
     for grp, key in ENDCAP_KEY.items():
+        if not _present(batch, grp, key):
+            continue  # optional collection (e.g. SimTracksters) not in this file
         v = batch[grp][key]
+        fallback = ENDCAP_KEY_FALLBACK.get(grp)
+        if fallback is not None and fallback in batch[grp].fields:
+            v = ak.where(v != 0, v, batch[grp][fallback])
         keep[grp] = (v >= 0) if side > 0 else (v < 0)
 
     maps = {grp: _index_map(keep[grp])
             for grp in ("SimCluster", "MergedSimCluster",
                         "MergedCaloTruthMergedSimCluster", "LayerCluster",
-                        CAND_TRACKSTER_COLLECTION)}
+                        CAND_TRACKSTER_COLLECTION,
+                        "ticlTrackstersCLUE3DHigh", "ticlTracksterLinks",
+                        "ticlSimTracksters", "ticlSimTrackstersFromCPs")
+            if grp in keep}
 
     out = {
         "RecHitHGC": _split_rechits(batch["RecHitHGC"], keep, maps, flip),
@@ -543,6 +742,34 @@ def build_endcap(batch, side):
         out[grp] = _split_tracksters(batch[grp], grp, keep[grp],
                                      maps["LayerCluster"], flip)
 
+    # --- MC truth: SimTracksters, sim candidates, reco<->sim associations ---
+    # (all optional: skipped for files produced without the SimTrackster tables)
+    for grp in SIM_TRACKSTER_GROUPS:
+        if grp in keep:
+            out[grp] = _split_simtracksters(batch[grp], grp, keep[grp],
+                                            maps["LayerCluster"],
+                                            maps["SimCluster"], flip)
+
+    if ("ticlSimTrackstersFromCPs" in keep
+            and _present(batch, "SimTICLCand", "SimTICLCand_eta")):
+        k_cand = keep["ticlSimTrackstersFromCPs"]
+        if not ak.all(ak.num(batch["SimTICLCand"]["SimTICLCand_eta"]) == ak.num(k_cand)):
+            raise RuntimeError(
+                "SimTICLCand is not parallel to ticlSimTrackstersFromCPs; "
+                "cannot reuse its endcap mask for the sim candidates.")
+        out["SimTICLCand"] = _split_ticlcands(batch["SimTICLCand"], k_cand, flip,
+                                              prefix="SimTICLCand")
+        if _present(batch, "SimCandidate2Tracksters",
+                    "SimCandidate2TrackstersIndices_tracksterIndex"):
+            out["SimCandidate2Tracksters"] = _split_candidates(
+                batch["SimCandidate2Tracksters"], k_cand,
+                maps["ticlSimTracksters"], prefix="SimCandidate2Tracksters")
+
+    for name, (src_grp, tgt_grp) in SIM_ASSOC_TABLES.items():
+        if (src_grp in keep and tgt_grp in maps
+                and _present(batch, name, f"{name}Links_index")):
+            out[name] = _split_assoc(batch[name], name, keep[src_grp], maps[tgt_grp])
+
     return ak.zip({name: ak.zip(flds, depth_limit=1) for name, flds in out.items()},
                   depth_limit=1)
 
@@ -554,6 +781,7 @@ def process_batch(ml_files):
     tmp_store = defaultdict(list)
 
     for f in tqdm(ml_files, desc="  nanoML", leave=False):
+        per_file = {}
         with uproot.open(f)["Events"] as tree:
             for group_name, branches in BRANCH_GROUPS.items():
                 data = tree.arrays(filter_name=branches, library="ak")
@@ -568,7 +796,12 @@ def process_batch(ml_files):
                     is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
                     data[f"{group_name}_isPileup"] = is_pileup
 
-                tmp_store[group_name].append(data)
+                per_file[group_name] = data
+
+        # SimTrackster seed type needs both SimTrackster groups of the file
+        _derive_sim_trackster_flags(per_file)
+        for group_name, data in per_file.items():
+            tmp_store[group_name].append(data)
 
     # Concatenate arrays across files in this batch
     batch = {name: ak.concatenate(arr_list) for name, arr_list in tmp_store.items()}
@@ -603,7 +836,8 @@ def main():
     print(f"Processing {n_files} nanoML files in {n_batches} batches of up to {batch_size}")
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
     print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
-          f"MergedCaloTruthMergedSimCluster_isPileup")
+          f"MergedCaloTruthMergedSimCluster_isPileup, "
+          f"ticlSimTracksters_seedIsCaloParticle, ticlSimTrackstersFromCPs_seedIsCaloParticle")
     print(f"Endcap split: 2 output events per input event "
           f"(-z endcap mirrored via z->-z, eta->-eta)")
     print(f"Candidate links assumed to point into: {CAND_TRACKSTER_COLLECTION}")

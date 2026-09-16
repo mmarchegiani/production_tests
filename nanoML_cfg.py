@@ -99,7 +99,8 @@ process.NANOAODSIMoutput = cms.OutputModule("NanoAODOutputModule",
 )
 
 process.NANOAODSIMoutput.outputCommands.remove("keep edmTriggerResults_*_*_*")
-# Keep the TICLCand table produced by ticl_step (not in default NANOAODSIMEventContent).
+# Keep the TICL tables (reco tracksters/candidates, SimTracksters, sim candidates
+# and reco<->sim associations): all their module labels start with "ticl".
 process.NANOAODSIMoutput.outputCommands.append("keep nanoaodFlatTable_ticl*_*_*")
 
 # Additional output definition
@@ -204,11 +205,176 @@ for _iterLabel in _ticlIterLabels:
     setattr(process, _attrName, _prod)
     _tracksterTableProducers.append(getattr(process, _attrName))
 
+# ---------------------------------------------------------------------------
+# MC-truth tracksters (ticlSimTracksters, scheduled in RECO.py) and their
+# associations to the reco tracksters -- the training target.
+#
+#   ticlSimTracksters         one SimTrackster per SimCluster, or per CaloParticle
+#                             when its G4 track crossed the calo boundary
+#   ticlSimTrackstersFromCPs  one SimTrackster per CaloParticle (only CPs with
+#                             at least one layer cluster are kept upstream)
+#   Both carry the reco-trackster kinematics plus:
+#     seedIndex       row of the seed in the SimCluster table (SimCluster seed)
+#                     or in the CaloPart table (CaloParticle seed)
+#     seedProductId   ProductID of the seed collection. All fromCPs entries are
+#                     CaloParticle-seeded, so a ticlSimTracksters entry is
+#                     CaloParticle-seeded iff its seedProductId equals the
+#                     fromCPs one (root_to_parquet*.py derive seedIsCaloParticle)
+#     ..vertices      LayerCluster index + energy fraction per constituent
+#     boundary*/simTime/genPt/mass (extension table): properties of
+#                     the seed CaloParticle/SimCluster at the calo boundary
+#   SimTICLCand / SimCandidate2Tracksters
+#                             sim TICLCandidates: rows parallel to
+#                             ticlSimTrackstersFromCPs, tracksterIndex points
+#                             into ticlSimTracksters
+#   <Reco>To<Sim><ByHits|ByLCs>, <Sim>To<Reco><ByHits|ByLCs>
+#                             one-to-many association tables: for every source
+#                             trackster the linked target index, sharedEnergy
+#                             and score (lower = better), from
+#                             allTrackstersToSimTrackstersAssociationsBy{Hits,LCs}
+# All module labels start with "ticl" so the "keep nanoaodFlatTable_ticl*"
+# output command above picks them up.
+# ---------------------------------------------------------------------------
+from PhysicsTools.NanoAOD.common_cff import Var
+
+_simTracksterCollections = {
+    "ticlSimTracksters": cms.InputTag("ticlSimTracksters"),
+    "ticlSimTrackstersFromCPs": cms.InputTag("ticlSimTracksters", "fromCPs"),
+}
+_simTracksterTableProducers = []
+for _name, _src in _simTracksterCollections.items():
+    _prod = cms.EDProducer("TracksterCollectionTableProducer",
+        skipNonExistingSrc=cms.bool(True),
+        src=_src,
+        cut=cms.string(""),
+        name=cms.string(_name),
+        doc=cms.string(_name),
+        singleton=cms.bool(False),
+        variables=cms.PSet(
+            raw_energy=Var("raw_energy", "float", doc="Raw energy [GeV]"),
+            raw_em_energy=Var("raw_em_energy", "float", doc="EM raw energy [GeV]"),
+            raw_pt=Var("raw_pt", "float", doc="Raw pT [GeV]"),
+            regressed_energy=Var("regressed_energy", "float", doc="Regressed energy: for SimTracksters the seed energy at the calo boundary [GeV]"),
+            barycenter_x=Var("barycenter.x", "float", doc="Barycenter x [cm]"),
+            barycenter_y=Var("barycenter.y", "float", doc="Barycenter y [cm]"),
+            barycenter_z=Var("barycenter.z", "float", doc="Barycenter z [cm]"),
+            barycenter_eta=Var("barycenter.eta", "float", doc="Barycenter eta"),
+            barycenter_phi=Var("barycenter.phi", "float", doc="Barycenter phi"),
+            time=Var("time", "float", doc="HGCAL time"),
+            timeError=Var("timeError", "float", doc="HGCAL time error"),
+            boundaryTime=Var("boundaryTime", "float", doc="Seed time at the calo boundary [ns]"),
+            seedIndex=Var("seedIndex", "int", doc="Index of the seed: SimCluster table row (SimCluster seed) or CaloPart table row (CaloParticle seed), see seedProductId"),
+            seedProductId=Var("seedID().id()", "uint", doc="ProductID of the seed collection; equal to the ticlSimTrackstersFromCPs value for CaloParticle seeds, different for SimCluster seeds"),
+        ),
+        collectionVariables=cms.PSet(
+            tracksterVertices=cms.PSet(
+                name=cms.string(_name + "vertices"),
+                doc=cms.string("SimTrackster<->LayerCluster association (vertex = LC index)"),
+                useCount=cms.bool(True),
+                useOffset=cms.bool(True),
+                variables=cms.PSet(
+                    vertices=Var("vertices", "uint", doc="LayerCluster index"),
+                    vertex_mult=Var("vertex_multiplicity", "float", doc="Fraction of LC energy used by the SimTrackster"),
+                ),
+            ),
+        ),
+    )
+    setattr(process, _name + "Table", _prod)
+    _simTracksterTableProducers.append(getattr(process, _name + "Table"))
+
+    # Extension table: seed CaloParticle / SimCluster at the calo boundary.
+    # NB (upstream bug in SimTracksterTableProducer): the boundaryPhi column is
+    # filled with the boundary eta; use boundaryPx/Py for the azimuth.
+    _extra = cms.EDProducer("SimTracksterTableProducer",
+        tableName=cms.string(_name),
+        skipNonExistingSrc=cms.bool(True),
+        simTracksters=_src,
+        caloParticles=cms.InputTag("mix", "MergedCaloTruth"),
+        simClusters=cms.InputTag("mix", "MergedCaloTruth"),
+        caloParticleToSimClustersMap=cms.InputTag("ticlSimTracksters"),
+        precision=cms.int32(-1),
+    )
+    setattr(process, _name + "ExtraTable", _extra)
+    _simTracksterTableProducers.append(getattr(process, _name + "ExtraTable"))
+
+# Sim TICLCandidates (std::vector<TICLCandidate> under the ticlSimTracksters label)
+process.ticlSimCandidateTable = process.ticlCandidateTable.clone(
+    src=cms.InputTag("ticlSimTracksters"),
+    name=cms.string("SimTICLCand"),
+    doc=cms.string("Sim TICLCandidates from ticlSimTracksters; rows parallel to ticlSimTrackstersFromCPs"),
+)
+process.ticlSimCandidateExtraTable = process.ticlCandidateExtraTable.clone(
+    src=cms.InputTag("ticlSimTracksters"),
+    name=cms.string("SimCandidate2Tracksters"),
+    doc=cms.string("Sim TICLCandidates extra table with linked SimTracksters"),
+    collectionVariables=cms.PSet(
+        tracksters=cms.PSet(
+            name=cms.string("SimCandidate2TrackstersIndices"),
+            doc=cms.string("ticlSimTracksters indices linked to each SimTICLCand"),
+            useCount=cms.bool(True),
+            useOffset=cms.bool(True),
+            variables=cms.PSet(),
+        ),
+    ),
+)
+
+# Reco <-> Sim trackster association tables. Short names keep the branch names
+# readable: e.g. CLUE3DHighToSimTSByHits (rows parallel to
+# ticlTrackstersCLUE3DHigh, links point into ticlSimTracksters) and
+# SimTSToCLUE3DHighByHits (the reverse). SimTSCP = ticlSimTrackstersFromCPs.
+# Only iterations covered by the associators (ticlIterLabelsPSet) can be added.
+_simAssocRecoLabels = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links"}
+_simAssocSimLabels = {"ticlSimTracksters": "SimTS", "ticlSimTrackstersfromCPs": "SimTSCP"}
+_simAssocTypes = ["ByHits", "ByLCs"]
+
+def _simAssocTable(src, name, doc, indexDoc):
+    return cms.EDProducer("TracksterTracksterEnergyScoreFlatTableProducer",
+        src=src,
+        skipNonExistingSrc=cms.bool(True),
+        name=cms.string(name),
+        doc=cms.string(doc),
+        collectionVariables=cms.PSet(
+            links=cms.PSet(
+                name=cms.string(name + "Links"),
+                doc=cms.string("Association links"),
+                useCount=cms.bool(True),
+                useOffset=cms.bool(True),
+                variables=cms.PSet(
+                    index=Var("index", "uint", doc=indexDoc),
+                    sharedEnergy=Var("sharedEnergy", "float", doc="Shared energy with the linked trackster [GeV]"),
+                    score=Var("score", "float", doc="Association score (lower is better)"),
+                ),
+            ),
+        ),
+    )
+
+_simAssocTableProducers = []
+for _recoLabel, _recoShort in _simAssocRecoLabels.items():
+    for _simLabel, _simShort in _simAssocSimLabels.items():
+        for _type in _simAssocTypes:
+            _assocModule = "allTrackstersToSimTrackstersAssociations" + _type
+            _r2s = _recoShort + "To" + _simShort + _type
+            setattr(process, "ticlAssoc" + _r2s + "Table", _simAssocTable(
+                cms.InputTag(_assocModule, _recoLabel + "To" + _simLabel), _r2s,
+                f"{_recoLabel} -> {_simLabel} association ({_type})",
+                f"Index into the {_simLabel} table"))
+            _simAssocTableProducers.append(getattr(process, "ticlAssoc" + _r2s + "Table"))
+            _s2r = _simShort + "To" + _recoShort + _type
+            setattr(process, "ticlAssoc" + _s2r + "Table", _simAssocTable(
+                cms.InputTag(_assocModule, _simLabel + "To" + _recoLabel), _s2r,
+                f"{_simLabel} -> {_recoLabel} association ({_type})",
+                f"Index into the {_recoLabel} table"))
+            _simAssocTableProducers.append(getattr(process, "ticlAssoc" + _s2r + "Table"))
+
 # All TICL nano producers get scheduled as a single Task attached to nanoAOD_step
 process.ticlTablesTask = cms.Task(
     process.ticlCandidateTable,
     process.ticlCandidateExtraTable,
     *_tracksterTableProducers,
+    *_simTracksterTableProducers,
+    process.ticlSimCandidateTable,
+    process.ticlSimCandidateExtraTable,
+    *_simAssocTableProducers,
 )
 
 # MergedCaloTruthMergedSimCluster nano table (PR #50578 CaloTruthAccumulator

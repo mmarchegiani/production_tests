@@ -142,12 +142,122 @@ BRANCH_GROUPS = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# MC-truth tracksters and reco<->sim associations (see nanoML_cfg.py)
+# ---------------------------------------------------------------------------
+
+# ticlSimTracksters: one SimTrackster per SimCluster, or per CaloParticle when
+# its G4 track crossed the calo boundary. ticlSimTrackstersFromCPs: one per
+# CaloParticle. `seedIndex` is the row of the seed in the SimCluster table
+# (SimCluster seed) or in the CaloPart table (CaloParticle seed); which one is
+# encoded in the derived <grp>_seedIsCaloParticle flag (see
+# _derive_sim_trackster_flags). The boundary*/simTime/genPt/mass
+# branches describe the seed at the calo boundary.
+# NB: boundaryPhi is filled with the boundary eta upstream
+# (SimTracksterTableProducer bug); use boundaryPx/Py for the azimuth.
+SIM_TRACKSTER_GROUPS = ("ticlSimTracksters", "ticlSimTrackstersFromCPs")
+
+
+def _sim_trackster_branches(grp):
+    return [
+        f'{grp}_raw_energy', f'{grp}_raw_em_energy',
+        f'{grp}_raw_pt', f'{grp}_regressed_energy',
+        f'{grp}_barycenter_x', f'{grp}_barycenter_y', f'{grp}_barycenter_z',
+        f'{grp}_barycenter_eta', f'{grp}_barycenter_phi',
+        f'{grp}_time', f'{grp}_timeError', f'{grp}_boundaryTime',
+        # seed (SimCluster or CaloParticle) the SimTrackster was built from
+        f'{grp}_seedIndex', f'{grp}_seedProductId',
+        # seed properties at the calo boundary (extension table)
+        f'{grp}_boundaryX', f'{grp}_boundaryY', f'{grp}_boundaryZ',
+        f'{grp}_boundaryEta', f'{grp}_boundaryPhi',
+        f'{grp}_boundaryPx', f'{grp}_boundaryPy', f'{grp}_boundaryPz',
+        # (simEnergy is computed upstream but not written to the table)
+        f'{grp}_simTime', f'{grp}_genPt', f'{grp}_mass',
+        # LayerCluster links (LC index + energy fraction, flat over tracksters)
+        f'{grp}_n{grp}vertices', f'{grp}_o{grp}vertices',
+        f'{grp}vertices_vertices', f'{grp}vertices_vertex_mult',
+    ]
+
+
+for _grp in SIM_TRACKSTER_GROUPS:
+    BRANCH_GROUPS[_grp] = _sim_trackster_branches(_grp)
+
+# Sim TICLCandidates: rows parallel to ticlSimTrackstersFromCPs;
+# SimCandidate2TrackstersIndices_tracksterIndex points into ticlSimTracksters.
+BRANCH_GROUPS["SimTICLCand"] = [
+    'SimTICLCand_pt', 'SimTICLCand_p', 'SimTICLCand_energy', 'SimTICLCand_raw_energy',
+    'SimTICLCand_eta', 'SimTICLCand_phi', 'SimTICLCand_mass',
+    'SimTICLCand_pdgID', 'SimTICLCand_charge',
+    'SimTICLCand_time', 'SimTICLCand_timeError',
+]
+BRANCH_GROUPS["SimCandidate2Tracksters"] = [
+    'nSimCandidate2Tracksters',
+    'nSimCandidate2TrackstersIndices',
+    'SimCandidate2TrackstersIndices_tracksterIndex',
+    'SimCandidate2Tracksters_nSimCandidate2TrackstersIndices',
+    'SimCandidate2Tracksters_oSimCandidate2TrackstersIndices',
+]
+
+# Reco <-> Sim trackster association tables, e.g. CLUE3DHighToSimTSByHits
+# (rows parallel to ticlTrackstersCLUE3DHigh, links point into
+# ticlSimTracksters) and SimTSToCLUE3DHighByHits (the reverse). Each has
+# per-row count/offset branches and a flat "...Links" table with the linked
+# index, sharedEnergy and score (lower is better).
+SIM_ASSOC_RECO = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links"}
+SIM_ASSOC_SIM = {"ticlSimTracksters": "SimTS", "ticlSimTrackstersFromCPs": "SimTSCP"}
+SIM_ASSOC_TYPES = ("ByHits", "ByLCs")
+
+# table name -> (source group, target group)
+SIM_ASSOC_TABLES = {}
+for _reco_grp, _reco_short in SIM_ASSOC_RECO.items():
+    for _sim_grp, _sim_short in SIM_ASSOC_SIM.items():
+        for _type in SIM_ASSOC_TYPES:
+            SIM_ASSOC_TABLES[f"{_reco_short}To{_sim_short}{_type}"] = (_reco_grp, _sim_grp)
+            SIM_ASSOC_TABLES[f"{_sim_short}To{_reco_short}{_type}"] = (_sim_grp, _reco_grp)
+
+
+def _assoc_branches(name):
+    return [
+        f'n{name}',
+        f'{name}_n{name}Links', f'{name}_o{name}Links',
+        f'n{name}Links',
+        f'{name}Links_index', f'{name}Links_sharedEnergy', f'{name}Links_score',
+    ]
+
+
+for _name in SIM_ASSOC_TABLES:
+    BRANCH_GROUPS[_name] = _assoc_branches(_name)
+
+
+def _derive_sim_trackster_flags(per_file):
+    """Add <grp>_seedIsCaloParticle to the SimTrackster groups of one file.
+
+    All ticlSimTrackstersFromCPs entries are CaloParticle-seeded, so a
+    SimTrackster is CaloParticle-seeded iff its seedProductId equals the
+    fromCPs one in the same event; otherwise seedIndex points into the
+    SimCluster table. No-op for files without the SimTrackster tables."""
+    ref_grp = "ticlSimTrackstersFromCPs"
+    ref = per_file.get(ref_grp)
+    if ref is None or f"{ref_grp}_seedProductId" not in ref.fields:
+        return
+    # per-event ProductID of the CaloParticle collection; 0 (an invalid
+    # ProductID, never matches) when the event has no CaloParticles. Filling
+    # here keeps the comparison below a plain `var * bool` (no option/union
+    # types, which pyarrow cannot write to parquet).
+    cp_pid = ak.fill_none(ak.firsts(ref[f"{ref_grp}_seedProductId"]), 0)
+    for grp in SIM_TRACKSTER_GROUPS:
+        data = per_file.get(grp)
+        if data is None or f"{grp}_seedProductId" not in data.fields:
+            continue
+        data[f"{grp}_seedIsCaloParticle"] = data[f"{grp}_seedProductId"] == cp_pid
+
 
 def process_batch(ml_files):
     """Process a batch of nanoML files and return the combined data."""
     tmp_store = defaultdict(list)
 
     for f in tqdm(ml_files, desc="  nanoML", leave=False):
+        per_file = {}
         with uproot.open(f)["Events"] as tree:
             for group_name, branches in BRANCH_GROUPS.items():
                 data = tree.arrays(filter_name=branches, library="ak")
@@ -171,7 +281,12 @@ def process_batch(ml_files):
                 #     is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
                 #     data["SimCluster_isPileup"] = is_pileup
 
-                tmp_store[group_name].append(data)
+                per_file[group_name] = data
+
+        # SimTrackster seed type needs both SimTrackster groups of the file
+        _derive_sim_trackster_flags(per_file)
+        for group_name, data in per_file.items():
+            tmp_store[group_name].append(data)
 
     # Concatenate arrays across files in this batch
     batch_data = {name: ak.concatenate(arr_list) for name, arr_list in tmp_store.items()}
@@ -200,7 +315,8 @@ def main():
     print(f"Processing {n_files} nanoML files in {n_batches} batches of up to {batch_size}")
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
     print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
-          f"MergedCaloTruthMergedSimCluster_isPileup")
+          f"MergedCaloTruthMergedSimCluster_isPileup, "
+          f"ticlSimTracksters_seedIsCaloParticle, ticlSimTrackstersFromCPs_seedIsCaloParticle")
     print(f"Writing incrementally to {output_path}")
 
     parquet_writer = None

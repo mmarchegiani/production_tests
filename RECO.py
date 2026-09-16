@@ -34,9 +34,12 @@ from SimCalorimetry.HGCalAssociatorProducers.LCToSCAssociation_cfi import layerC
 from SimGeneral.TrackingAnalysis.simHitTPAssociation_cfi import simHitTPAssocProducer
 
 process.lcAssocByEnergyScoreProducer = lcAssocByEnergyScoreProducer
-process.layerClusterCaloParticleAssociationProducer = layerClusterSimClusterAssociationProducer
+# NB: the module labels must match the producer type: ticlSimTracksters consumes
+# layerClusterSimClusterAssociationProducer as an LC->SimCluster map and
+# layerClusterCaloParticleAssociationProducer as an LC->CaloParticle map.
+process.layerClusterCaloParticleAssociationProducer = layerClusterCaloParticleAssociationProducer
 process.scAssocByEnergyScoreProducer = scAssocByEnergyScoreProducer
-process.layerClusterSimClusterAssociationProducer = layerClusterCaloParticleAssociationProducer
+process.layerClusterSimClusterAssociationProducer = layerClusterSimClusterAssociationProducer
 process.simHitTPAssocProducer = simHitTPAssocProducer
 
 process.hgcalAssociators = cms.Task(
@@ -51,6 +54,59 @@ process.hgcalAssociators = cms.Task(
 process.assoc = cms.Sequence(process.hgcalAssociators)
 
 process.recosim_step *= process.assoc
+
+# ---------------------------------------------------------------------------
+# SimTracksters (MC-truth tracksters) and Trackster <-> SimTrackster associators.
+# In CMSSW these live in the validation sequence (globalPrevalidationHGCal), not
+# in RECO, so they have to be scheduled explicitly here.
+#
+# ticlSimTracksters produces (all under the module label "ticlSimTracksters"):
+#   - TracksterCollection ""        : one SimTrackster per SimCluster (or per
+#                                     CaloParticle when its G4 track crossed the
+#                                     calo boundary); seedID()/seedIndex() point
+#                                     back to the seeding SimCluster/CaloParticle
+#   - TracksterCollection "fromCPs" : one SimTrackster per CaloParticle
+#   - TracksterCollection "PU"      : a single trackster with all PU layer clusters
+#   - std::vector<TICLCandidate>    : sim TICLCandidates (SimTrackster + reco track)
+#   - std::map<uint,vector<uint>>   : CaloParticle index -> SimTrackster indices
+#   - std::vector<float> "" / "fromCPs": layer-cluster masks
+# ---------------------------------------------------------------------------
+from RecoHGCal.TICL.SimTracksters_cff import filteredLayerClustersSimTracksters, ticlSimTracksters
+from SimCalorimetry.HGCalAssociatorProducers.LCToTSAssociator_cfi import allLayerClusterToTracksterAssociations
+from SimCalorimetry.HGCalAssociatorProducers.HitToTracksterAssociation_cfi import allHitToTracksterAssociations
+from SimCalorimetry.HGCalAssociatorProducers.hitToSimClusterCaloParticleAssociator_cfi import hitToSimClusterCaloParticleAssociator
+from SimCalorimetry.HGCalAssociatorProducers.TSToSimTSAssociation_cfi import allTrackstersToSimTrackstersAssociationsByLCs
+from SimCalorimetry.HGCalAssociatorProducers.TSToSimTSAssociationByHits_cfi import allTrackstersToSimTrackstersAssociationsByHits
+from SimCalorimetry.HGCalAssociatorProducers.SimClusterToCaloParticleAssociation_cfi import SimClusterToCaloParticleAssociation
+
+process.filteredLayerClustersSimTracksters = filteredLayerClustersSimTracksters
+process.ticlSimTracksters = ticlSimTracksters
+# LC->Trackster and RecHit->Trackster maps for every TICL iteration plus the
+# SimTracksters; inputs of the ByLCs / ByHits Trackster->SimTrackster associators.
+process.allLayerClusterToTracksterAssociations = allLayerClusterToTracksterAssociations
+process.allHitToTracksterAssociations = allHitToTracksterAssociations
+process.hitToSimClusterCaloParticleAssociator = hitToSimClusterCaloParticleAssociator
+# Reco Trackster <-> SimTrackster associations (both directions, instance labels
+# e.g. "ticlTrackstersCLUE3DHighToticlSimTracksters", "ticlSimTrackstersToticlTrackstersCLUE3DHigh")
+process.allTrackstersToSimTrackstersAssociationsByLCs = allTrackstersToSimTrackstersAssociationsByLCs
+process.allTrackstersToSimTrackstersAssociationsByHits = allTrackstersToSimTrackstersAssociationsByHits
+# SimCluster <-> CaloParticle association (SimCluster-seeded SimTracksters can be
+# mapped to their CaloParticle through this)
+process.SimClusterToCaloParticleAssociation = SimClusterToCaloParticleAssociation
+
+process.ticlSimTrackstersTask = cms.Task(
+    process.filteredLayerClustersSimTracksters,
+    process.ticlSimTracksters,
+    process.allLayerClusterToTracksterAssociations,
+    process.allHitToTracksterAssociations,
+    process.hitToSimClusterCaloParticleAssociator,
+    process.allTrackstersToSimTrackstersAssociationsByLCs,
+    process.allTrackstersToSimTrackstersAssociationsByHits,
+    process.SimClusterToCaloParticleAssociation,
+)
+process.simTracksters = cms.Sequence(process.ticlSimTrackstersTask)
+
+process.recosim_step *= process.simTracksters
 
 # Print out event content for debugging
 #process.dump=cms.EDAnalyzer('EventContentAnalyzer')
@@ -83,6 +139,18 @@ process.FEVTDEBUGoutput.outputCommands.extend(["keep *_MergedTrackTruth_*_*",
     "keep *_simTrack*_*_*",
     "keep *_simHit*_*_*",
     "keep *_mix_MergedCaloTruth*_*",
+    # MC-truth tracksters and their associations (see block above). The pre1
+    # FEVTDEBUG content (RecoHGCal_EventContent_cff) already lists most of these;
+    # they are repeated here so the file documents what nanoML relies on.
+    # In CMSSW_20_0_0_pre1 the sim TICLCandidates and the fromCPs tracksters are
+    # instances of the ticlSimTracksters module, so the first line already covers
+    # them; the next two only matter if they become separate modules upstream.
+    "keep *_ticlSimTracksters_*_*",
+    "keep *_ticlSimTICLCandidates_*_*",
+    "keep *_ticlSimTrackstersFromCP_*_*",
+    "keep *_allTrackstersToSimTrackstersAssociations*_*_*",
+    "keep *_allLayerClusterToTracksterAssociations_*_*",
+    "keep *_SimClusterToCaloParticleAssociation_*_*",
 ])
 
 process.options.numberOfThreads=cms.untracked.uint32(options.nThreads)
