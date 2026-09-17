@@ -241,6 +241,14 @@ python3 root_to_parquet.py \
     --outputFile mydata.parquet
 ```
 
+Both scripts stream the input in chunks of `--step_size` events (default
+500) and append each chunk to the single output file as one parquet row
+group, so peak memory is set by the chunk size rather than by the file
+size (a 10k-event tau file needs > 34 GB if loaded at once). Readers can
+therefore iterate the file row group by row group
+(`ak.from_parquet(file, row_groups=[...])`). `--max_events N` converts
+only the first N events of each file, for quick tests.
+
 ## One-shot pipeline scripts
 
 For a quick single-particle-type campaign, [`scripts/`](scripts/)

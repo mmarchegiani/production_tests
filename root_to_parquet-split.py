@@ -3,7 +3,6 @@ import numpy as np
 import awkward as ak
 from glob import glob
 from tqdm import tqdm
-from collections import defaultdict
 import os, pathlib
 import argparse
 import gc
@@ -23,7 +22,14 @@ def parse_args():
     parser.add_argument('--outputDir', type=str, default="parquet_out", help='Output directory for parquet files')
     parser.add_argument('--outputFile', type=str, default="output.parquet", help='Output parquet filename')
     parser.add_argument('--compression', type=str, default='lz4', help='Parquet compression algorithm')
-    parser.add_argument('--batch_size', type=int, default=2, help='Number of files to process at once')
+    parser.add_argument('--step_size', type=int, default=500,
+                        help='Events per chunk. Each chunk is converted and appended to the single output '
+                             'parquet file as one row group, so peak memory scales with this, not with the '
+                             'file size (default: 500)')
+    parser.add_argument('--max_events', type=int, default=None,
+                        help='Only convert the first N events of each file (for tests)')
+    # kept for backwards compatibility; files are now streamed one chunk at a time
+    parser.add_argument('--batch_size', type=int, default=None, help=argparse.SUPPRESS)
 
     return parser.parse_args()
 
@@ -32,7 +38,7 @@ def parse_args():
 # naming: e.g. "SimCluster_" branches all belong to the SimCluster object.
 #
 # Note: SimCluster_isPileup, MergedSimCluster_isPileup and
-# MergedCaloTruthMergedSimCluster_isPileup are derived in process_batch() from
+# MergedCaloTruthMergedSimCluster_isPileup are derived in process_chunk() from
 # the corresponding bunchCrossing/eventId branches (signal iff BX==0 AND
 # eventId==0). They are not read from disk.
 BRANCH_GROUPS = {
@@ -359,122 +365,41 @@ def _remap(idx, index_map):
     return padded[safe]
 
 
-# def _split_matches(idx, qual, nmatch, row_counts, keep_rows, target_map):
-#     """Handle a (MatchIdx, MatchQual, NumMatch) triplet during the split.
-
-#     Supports both layouts, auto-detected per collection:
-#       * row-aligned: one (best-match) entry per source object
-#       * flat multi-match: NumMatch entries per source object, flattened
-
-#     target_map=None leaves index values untouched -- used for targets that are
-#     not stored in the parquet (CaloParticles), whose indices then still refer
-#     to the ORIGINAL un-split event.
-
-#     Returns (idx_out, qual_out, nmatch_out), already filtered to keep_rows.
-#     """
-#     remapped = _remap(idx, target_map) if target_map is not None else idx
-#     if ak.all(ak.num(idx) == row_counts):
-#         # single match per row
-#         q = qual[keep_rows] if qual is not None else None
-#         return remapped[keep_rows], q, nmatch[keep_rows]
-
-#     # flat multi-match layout: regroup per source object via NumMatch
-#     fc = ak.flatten(nmatch)
-#     nested_idx = ak.unflatten(remapped, fc, axis=1)[keep_rows]
-#     nested_qual = (ak.unflatten(qual, fc, axis=1)[keep_rows]
-#                    if qual is not None else None)
-#     if target_map is not None:
-#         # drop matches into the removed endcap (physically shouldn't happen)
-#         good = nested_idx >= 0
-#         nested_idx = nested_idx[good]
-#         if nested_qual is not None:
-#             nested_qual = nested_qual[good]
-#     out_idx = ak.flatten(nested_idx, axis=2)
-#     out_qual = ak.flatten(nested_qual, axis=2) if nested_qual is not None else None
-#     out_n = ak.num(nested_idx, axis=2)
-#     return out_idx, out_qual, out_n
-
 def _split_matches(idx, qual, nmatch, row_counts, keep_rows, target_map):
+    """Handle a (MatchIdx, MatchQual, NumMatch) triplet during the split.
+
+    Supports both layouts, auto-detected per collection:
+      * row-aligned: one (best-match) entry per source object
+      * flat multi-match: NumMatch entries per source object, flattened
+
+    target_map=None leaves index values untouched -- used for targets that are
+    not stored in the parquet (CaloParticles), whose indices then still refer
+    to the ORIGINAL un-split event.
+
+    Returns (idx_out, qual_out, nmatch_out), already filtered to keep_rows.
+    Fully vectorised: the flat layout is regrouped with _regroup, which is
+    unambiguous for rows with zero matches."""
     remapped = _remap(idx, target_map) if target_map is not None else idx
 
     # Layout 1: one entry per source row
     if ak.all(ak.num(idx) == row_counts):
-        idx_events = ak.to_list(remapped)
-        keep_events = ak.to_list(keep_rows)
-        nmatch_events = ak.to_list(nmatch)
-        qual_events = ak.to_list(qual) if qual is not None else None
+        q = qual[keep_rows] if qual is not None else None
+        return remapped[keep_rows], q, nmatch[keep_rows]
 
-        out_idx = []
-        out_qual = [] if qual_events is not None else None
-        out_n = []
+    # Layout 2: flat multi-match list plus per-row counts
+    nested_idx = _regroup(remapped, nmatch)[keep_rows]
+    nested_qual = _regroup(qual, nmatch)[keep_rows] if qual is not None else None
+    if target_map is not None:
+        # drop matches into the removed endcap (physically shouldn't happen)
+        good = nested_idx >= 0
+        nested_idx = nested_idx[good]
+        if nested_qual is not None:
+            nested_qual = nested_qual[good]
+    out_idx = ak.flatten(nested_idx, axis=2)
+    out_qual = ak.flatten(nested_qual, axis=2) if nested_qual is not None else None
+    out_n = ak.num(nested_idx, axis=2)
+    return out_idx, out_qual, out_n
 
-        for ev_i, ev_keep, ev_n in zip(idx_events, keep_events, nmatch_events):
-            out_idx.append([value for value, keep in zip(ev_i, ev_keep) if keep])
-            out_n.append([value for value, keep in zip(ev_n, ev_keep) if keep])
-
-        if qual_events is not None:
-            for ev_q, ev_keep in zip(qual_events, keep_events):
-                out_qual.append([value for value, keep in zip(ev_q, ev_keep) if keep])
-
-        return (
-            ak.Array(out_idx),
-            ak.Array(out_qual) if out_qual is not None else None,
-            ak.Array(out_n),
-        )
-
-    # Layout 2: flattened multi-match list plus per-row counts
-    idx_events = ak.to_list(remapped)
-    keep_events = ak.to_list(keep_rows)
-    nmatch_events = ak.to_list(nmatch)
-    qual_events = ak.to_list(qual) if qual is not None else None
-
-    out_idx = []
-    out_qual = [] if qual_events is not None else None
-    out_n = []
-
-    for iev, (ev_idx, ev_keep, ev_nmatch) in enumerate(zip(idx_events, keep_events, nmatch_events)):
-        ev_out_idx = []
-        ev_out_n = []
-        ev_out_qual = [] if qual_events is not None else None
-
-        ev_qual = qual_events[iev] if qual_events is not None else None
-        pos = 0
-
-        for keep, count in zip(ev_keep, ev_nmatch):
-            chunk_idx = ev_idx[pos:pos + count]
-            chunk_qual = ev_qual[pos:pos + count] if ev_qual is not None else None
-            pos += count
-
-            if not keep:
-                continue
-
-            if target_map is not None:
-                good = [value >= 0 for value in chunk_idx]
-                chunk_idx = [value for value, is_good in zip(chunk_idx, good) if is_good]
-                if chunk_qual is not None:
-                    chunk_qual = [value for value, is_good in zip(chunk_qual, good) if is_good]
-
-            ev_out_idx.extend(chunk_idx)
-            ev_out_n.append(len(chunk_idx))
-
-            if ev_out_qual is not None:
-                ev_out_qual.extend(chunk_qual)
-
-        out_idx.append(ev_out_idx)
-        out_n.append(ev_out_n)
-        if out_qual is not None:
-            out_qual.append(ev_out_qual)
-
-    return (
-        ak.Array(out_idx),
-        ak.Array(out_qual) if out_qual is not None else None,
-        ak.Array(out_n),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Per-group split processors
-# ---------------------------------------------------------------------------
 
 def _split_rechits(d, keep, maps, flip):
     k = keep["RecHitHGC"]
@@ -774,37 +699,59 @@ def build_endcap(batch, side):
                   depth_limit=1)
 
 
-def process_batch(ml_files):
-    """Process a batch of nanoML files, split every event into its two
-    endcaps, and return the combined data (2 output events per input event,
-    interleaved: [+z of ev0, -z of ev0, +z of ev1, ...])."""
-    tmp_store = defaultdict(list)
 
-    for f in tqdm(ml_files, desc="  nanoML", leave=False):
-        per_file = {}
-        with uproot.open(f)["Events"] as tree:
-            for group_name, branches in BRANCH_GROUPS.items():
-                data = tree.arrays(filter_name=branches, library="ak")
 
-                # Derive isPileup flag for SimCluster and MergedSimCluster:
-                # signal iff bunchCrossing == 0 AND eventId == 0; anything
-                # else is pileup (either OOT via BX != 0 or in-time PU
-                # minbias via eventId != 0).
-                if group_name in ("SimCluster", "MergedSimCluster", "MergedCaloTruthMergedSimCluster"):
-                    bx_branch = f"{group_name}_bunchCrossing"
-                    ev_branch = f"{group_name}_eventId"
-                    is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
-                    data[f"{group_name}_isPileup"] = is_pileup
+def _chunk_to_table(chunk, schema):
+    """Convert one chunk to an arrow table with the schema of the first chunk.
 
-                per_file[group_name] = data
+    Plain arrow types (no awkward extension types) so that chunks can be cast:
+    a chunk in which some collection is empty everywhere may come out with a
+    slightly different (e.g. null-typed) column, and every row group of a
+    parquet file must share one schema."""
+    table = ak.to_arrow_table(chunk, extensionarray=False)
+    if schema is None:
+        return table, table.schema
+    if not table.schema.equals(schema):
+        try:
+            table = table.cast(schema)
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError) as e:
+            raise RuntimeError(
+                "Chunk schema differs from the first chunk and cannot be cast; "
+                "try a larger --step_size so that the first chunk is representative.\n"
+                f"{e}") from e
+    return table, schema
 
-        # SimTrackster seed type needs both SimTrackster groups of the file
-        _derive_sim_trackster_flags(per_file)
-        for group_name, data in per_file.items():
-            tmp_store[group_name].append(data)
 
-    # Concatenate arrays across files in this batch
-    batch = {name: ak.concatenate(arr_list) for name, arr_list in tmp_store.items()}
+def _iter_chunks(tree, step_size, max_events):
+    """Yield (start, stop) entry ranges covering the tree."""
+    n = tree.num_entries if max_events is None else min(tree.num_entries, max_events)
+    for start in range(0, n, step_size):
+        yield start, min(start + step_size, n)
+
+
+def process_chunk(tree, start, stop):
+    """Read events [start, stop) of one nanoML tree, split every event into
+    its two endcaps, and return the combined data (2 output events per input
+    event, interleaved: [+z of ev0, -z of ev0, +z of ev1, ...])."""
+    per_file = {}
+    for group_name, branches in BRANCH_GROUPS.items():
+        data = tree.arrays(filter_name=branches, entry_start=start, entry_stop=stop, library="ak")
+
+        # Derive isPileup flag for SimCluster and MergedSimCluster:
+        # signal iff bunchCrossing == 0 AND eventId == 0; anything
+        # else is pileup (either OOT via BX != 0 or in-time PU
+        # minbias via eventId != 0).
+        if group_name in ("SimCluster", "MergedSimCluster", "MergedCaloTruthMergedSimCluster"):
+            bx_branch = f"{group_name}_bunchCrossing"
+            ev_branch = f"{group_name}_eventId"
+            is_pileup = ~((data[bx_branch] == 0) & (data[ev_branch] == 0))
+            data[f"{group_name}_isPileup"] = is_pileup
+
+        per_file[group_name] = data
+
+    # SimTrackster seed type needs both SimTrackster groups of the chunk
+    _derive_sim_trackster_flags(per_file)
+    batch = per_file
 
     # Split each event into two: +z endcap as-is, -z endcap mirrored to +z
     pos = build_endcap(batch, +1)
@@ -828,12 +775,14 @@ def main():
     outdir.mkdir(exist_ok=True)
     output_path = outdir / args.outputFile
 
-    # Process in batches and append to a single parquet file
-    batch_size = args.batch_size
+    # Stream every file in chunks of --step_size events; each chunk becomes one
+    # row group of the single output parquet file, so peak memory is bounded by
+    # the chunk size rather than by the file size.
+    step_size = args.step_size
     n_files = len(MLfileList)
-    n_batches = (n_files + batch_size - 1) // batch_size
 
-    print(f"Processing {n_files} nanoML files in {n_batches} batches of up to {batch_size}")
+    print(f"Processing {n_files} nanoML files in chunks of {step_size} events"
+          + (f" (first {args.max_events} events per file)" if args.max_events else ""))
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
     print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
           f"MergedCaloTruthMergedSimCluster_isPileup, "
@@ -844,34 +793,35 @@ def main():
     print(f"Writing incrementally to {output_path}")
 
     parquet_writer = None
+    schema = None
+    n_written = 0
 
-    for i in tqdm(range(n_batches), desc="Processing batches"):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, n_files)
-        ml_batch = MLfileList[start_idx:end_idx]
+    for i, f in enumerate(MLfileList):
+        with uproot.open(f)["Events"] as tree:
+            chunks = list(_iter_chunks(tree, step_size, args.max_events))
+            print(f"\nFile {i+1}/{n_files}: {f} ({tree.num_entries} events, {len(chunks)} chunks)")
+            for start, stop in tqdm(chunks, desc="  chunks", leave=False):
+                chunk = process_chunk(tree, start, stop)
 
-        print(f"\nBatch {i+1}/{n_batches}: files {start_idx+1}-{end_idx}")
-        batch_data = process_batch(ml_batch)
+                # Convert to arrow table (schema fixed by the first chunk)
+                table, schema = _chunk_to_table(chunk, schema)
 
-        # Convert to arrow table
-        table = ak.to_arrow_table(batch_data)
+                # Write or append to parquet (one row group per chunk)
+                if parquet_writer is None:
+                    parquet_writer = pq.ParquetWriter(
+                        output_path,
+                        schema,
+                        compression=args.compression,
+                    )
+                parquet_writer.write_table(table)
+                n_written += len(chunk)
 
-        # Write or append to parquet
-        if parquet_writer is None:
-            parquet_writer = pq.ParquetWriter(
-                output_path,
-                table.schema,
-                compression=args.compression,
-            )
-
-        parquet_writer.write_table(table)
-        print(f"  Appended batch {i+1} to parquet ({len(batch_data)} split events)")
-
-        del batch_data, table
-        gc.collect()
+                del chunk, table
+                gc.collect()
 
     if parquet_writer:
         parquet_writer.close()
+    print(f"Wrote {n_written} split events ({n_written // 2} input events)")
 
     print(f"\nDone! Created single parquet file: {output_path}")
 
