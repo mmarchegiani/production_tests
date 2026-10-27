@@ -41,6 +41,13 @@ def parse_args():
     parser.add_argument('--overwrite', action='store_true',
                         help='Replace an existing root:// output file (by default the script refuses '
                              'to start if the remote file already exists)')
+    parser.add_argument('--schema', choices=list(SCHEMAS), default='auto',
+                        help='Flavour of the input nano: nanoML (our pepr production, the branch names '
+                             'of BRANCH_GROUPS), ticlnano (the upstream CMSSW TICL NanoAOD, e.g. the TICL '
+                             'v6 hackathon files: HGCalLayerClusters, TICLCandidates, '
+                             'ticlSimTrackstersfromCPs, Reco<iteration>2SimSCByHits, ...; the branches are '
+                             'renamed to the nanoML names on the way in, see configure_schema), or auto '
+                             '(default: detected from the first file)')
     # kept for backwards compatibility; files are now streamed one chunk at a time
     parser.add_argument('--batch_size', type=int, default=None, help=argparse.SUPPRESS)
 
@@ -295,7 +302,12 @@ def _derive_sim_trackster_flags(per_file):
 # Which trackster collection Candidate2TrackstersIndices_tracksterIndex points
 # into. In >=15.x TICLCandidates are built from the linked tracksters; verify
 # this matches your production before trusting the remapped candidate links.
+# (ticlnano files: ticlTracksterInterpretations, set by configure_schema.)
 CAND_TRACKSTER_COLLECTION = "ticlTracksterLinks"
+
+# Reco trackster collections converted when present (configure_schema appends
+# the ticlnano-only ones).
+TRACKSTER_GROUPS = ["ticlTrackstersCLUE3DHigh", "ticlTracksterLinks", "ticlTrackstersRecovery"]
 
 # Field used to decide endcap membership for each collection.
 # Positive endcap keeps value >= 0 (so nothing exactly at 0 is lost);
@@ -330,6 +342,158 @@ ENDCAP_KEY_FALLBACK = {
 # i.e. z -> -z and eta -> -eta, while x, y, phi are left untouched. Note this
 # is a parity flip in z (handedness is mirrored, which is irrelevant for the
 # ML inputs). detId is NOT modified and still encodes the original z-side.
+
+
+# ---------------------------------------------------------------------------
+# Input schemas
+# ---------------------------------------------------------------------------
+#
+# nanoML    our pepr production (nanoML_cfg.py): the names in BRANCH_GROUPS, which
+#           are also the parquet column names.
+# ticlnano  the upstream CMSSW TICL NanoAOD (RecoHGCal/TICL nano tables; e.g. the
+#           CMSSW_20_1_0_pre4 "ticlv6" hackathon files under
+#           /eos/cms/store/group/dpg_hgcal/comm_hgcal/wredjeb/). It is produced by
+#           the same table producers as ours with other table names, and it has NO
+#           RecHit, SimCluster, CaloParticle or MergedSimCluster tables (nothing can
+#           recover them: the parquet then holds LayerCluster, the tracksters,
+#           TICLCand, the SimTracksters, SimTICLCand and the ByHits associations).
+#           Branches are renamed to the nanoML names as they are read (RENAME), so
+#           the parquet columns are the usual ones; collections and fields that
+#           only exist there (ticlTracksterInterpretations, the superclustering
+#           tracksters, their associations, LayerCluster layer/algoID/time, the
+#           SimTrackster caloParticleIdx/isPU, the trackster PCA shape) are added
+#           by configure_schema() for that schema only, so that the nanoML parquet
+#           schema does not change. Its TICLCandidates point into
+#           ticlTracksterInterpretations (ticlCandidateExtraTable.tracksters) and
+#           carry no per-candidate offsets; SimTracksters have no seedIndex /
+#           seedProductId but caloParticleIdx, the row of their CaloParticle, i.e.
+#           of their ticlSimTrackstersFromCPs entry (one per CaloParticle).
+SCHEMAS = ("auto", "nanoML", "ticlnano")
+SCHEMA = "nanoML"   # set by configure_schema()
+RENAME = {}         # nanoML branch name -> name of that branch in the file (ticlnano)
+
+TICLNANO_EXTRA_TRACKSTER_GROUPS = ["ticlTracksterInterpretations",
+                                   "ticlTracksterLinksSuperclusteringDNN"]
+TICLNANO_EXTRA_ASSOC_RECO = {"ticlTracksterInterpretations": "Interpretations",
+                             "ticlTracksterLinksSuperclusteringDNN": "SuperclusteringDNN"}
+# PCA shape of the tracksters (eigenvalues and main axis), dumped by the same
+# producer for the reco and the sim tracksters
+TICLNANO_SHAPE_FIELDS = ["EV1", "EV2", "EV3", "eVector0_x", "eVector0_y", "eVector0_z"]
+TICLNANO_EXTRA_FIELDS = {
+    "LayerCluster": ["LayerCluster_layer", "LayerCluster_algoID", "LayerCluster_correctedEnergy",
+                     "LayerCluster_time", "LayerCluster_timeError"],
+    "ticlSimTracksters": ["ticlSimTracksters_caloParticleIdx", "ticlSimTracksters_isPU"],
+    "ticlSimTrackstersFromCPs": ["ticlSimTrackstersFromCPs_caloParticleIdx",
+                                 "ticlSimTrackstersFromCPs_isPU"],
+}
+
+
+def _trackster_branches(grp):
+    """The branches of a reco trackster table (same list as the literal
+    ticlTrackstersCLUE3DHigh entry of BRANCH_GROUPS)."""
+    return [
+        f'{grp}_raw_energy', f'{grp}_raw_em_energy',
+        f'{grp}_raw_pt', f'{grp}_regressed_energy',
+        f'{grp}_barycenter_x', f'{grp}_barycenter_y', f'{grp}_barycenter_z',
+        f'{grp}_barycenter_eta', f'{grp}_barycenter_phi',
+        f'{grp}_time', f'{grp}_timeError',
+        f'{grp}_n{grp}vertices', f'{grp}_o{grp}vertices',
+        f'{grp}vertices_vertices', f'{grp}vertices_vertex_mult',
+    ]
+
+
+def _ticlnano_name(group, branch):
+    """Name, in a ticlnano file, of the nanoML branch `branch` of group `group`
+    (the name itself when the two agree, e.g. all ticlTracksters* branches)."""
+    if group in SIM_ASSOC_TABLES:
+        # CLUE3DHighToSimTSByHits -> RecoticlTrackstersCLUE3DHigh2SimSCByHits,
+        # SimTSCPToLinksByHits    -> SimCP2ticlTracksterLinksByHits, ...
+        src, tgt = SIM_ASSOC_TABLES[group]
+        typ = "ByLCs" if group.endswith("ByLCs") else "ByHits"
+        if src in SIM_ASSOC_RECO:
+            theirs = f"Reco{src}2Sim{'SC' if tgt == 'ticlSimTracksters' else 'CP'}{typ}"
+        else:
+            theirs = f"Sim{'SC' if src == 'ticlSimTracksters' else 'CP'}2{tgt}{typ}"
+        return branch.replace(group, theirs)
+    if group == "LayerCluster":
+        for f in ("x", "y", "z", "eta", "phi"):
+            if branch == f"LayerCluster_{f}":
+                return f"HGCalLayerClusters_position_{f}"
+        return branch.replace("LayerCluster", "HGCalLayerClusters")
+    if group == "TICLCand":
+        return branch.replace("TICLCand_", "TICLCandidates_")
+    if group == "Candidate2Tracksters":
+        return {"Candidate2TrackstersIndices_tracksterIndex": "TICLCandidatesExtra_tracksterIndex",
+                "TICLCand_nCandidate2TrackstersIndices": "TICLCandidates_nTICLCandidatesExtra",
+                "nCandidate2TrackstersIndices": "nTICLCandidatesExtra",
+                "nCandidate2Tracksters": "nTICLCandidates"}.get(branch, branch)
+    if group == "SimTICLCand":
+        return branch.replace("SimTICLCand_", "SimTICLCandidates_")
+    if group == "SimCandidate2Tracksters":
+        return {"SimCandidate2TrackstersIndices_tracksterIndex": "SimTICLCandidatesExtra_tracksterIndex",
+                "SimTICLCand_nSimCandidate2TrackstersIndices": "SimTICLCandidates_nSimTICLCandidatesExtra",
+                "nSimCandidate2TrackstersIndices": "nSimTICLCandidatesExtra",
+                "nSimCandidate2Tracksters": "nSimTICLCandidates"}.get(branch, branch)
+    if group == "ticlSimTrackstersFromCPs":
+        return branch.replace("ticlSimTrackstersFromCPs", "ticlSimTrackstersfromCPs")
+    return branch
+
+
+def detect_schema(tree):
+    """ticlnano if the Events tree carries the upstream TICL NanoAOD table
+    names, nanoML otherwise."""
+    keys = set(tree.keys())
+    if "nHGCalLayerClusters" in keys and "nTICLCandidates" in keys:
+        return "ticlnano"
+    return "nanoML"
+
+
+def configure_schema(schema):
+    """Adapt the module-level tables to the input schema (call once, before the
+    first chunk is read). nanoML leaves everything as defined above."""
+    global SCHEMA, RENAME, CAND_TRACKSTER_COLLECTION
+    SCHEMA = schema
+    RENAME = {}
+    if schema != "ticlnano":
+        return
+    for grp in TICLNANO_EXTRA_TRACKSTER_GROUPS:
+        BRANCH_GROUPS[grp] = _trackster_branches(grp)
+        if grp not in TRACKSTER_GROUPS:
+            TRACKSTER_GROUPS.append(grp)
+        ENDCAP_KEY[grp] = f"{grp}_barycenter_z"
+    for reco_grp, reco_short in TICLNANO_EXTRA_ASSOC_RECO.items():
+        SIM_ASSOC_RECO[reco_grp] = reco_short
+        for sim_grp, sim_short in SIM_ASSOC_SIM.items():
+            for typ in SIM_ASSOC_TYPES:
+                SIM_ASSOC_TABLES[f"{reco_short}To{sim_short}{typ}"] = (reco_grp, sim_grp)
+                SIM_ASSOC_TABLES[f"{sim_short}To{reco_short}{typ}"] = (sim_grp, reco_grp)
+    for name in SIM_ASSOC_TABLES:
+        BRANCH_GROUPS.setdefault(name, _assoc_branches(name))
+    for grp, fields in TICLNANO_EXTRA_FIELDS.items():
+        BRANCH_GROUPS[grp] = BRANCH_GROUPS[grp] + [f for f in fields if f not in BRANCH_GROUPS[grp]]
+    for grp in TRACKSTER_GROUPS + list(SIM_TRACKSTER_GROUPS):
+        BRANCH_GROUPS[grp] = BRANCH_GROUPS[grp] + [f"{grp}_{f}" for f in TICLNANO_SHAPE_FIELDS]
+    CAND_TRACKSTER_COLLECTION = "ticlTracksterInterpretations"
+    for grp, branches in BRANCH_GROUPS.items():
+        for b in branches:
+            theirs = _ticlnano_name(grp, b)
+            if theirs != b:
+                RENAME[b] = theirs
+
+
+def read_group(tree, group, start, stop):
+    """Read the branches of `group` for events [start, stop) under their nanoML
+    names, whatever the input schema; branches the file does not have are left
+    out (optional collections and fields), so the result may have no field."""
+    order = {name: i for i, name in enumerate(tree.keys())}
+    wanted = BRANCH_GROUPS[group]
+    # tree order, as filter_name= used to return them: keeps the parquet struct
+    # field order (hence the schema) of the nanoML output unchanged
+    exprs = sorted((b for b in wanted if RENAME.get(b, b) in order),
+                   key=lambda b: order[RENAME.get(b, b)])
+    aliases = {b: RENAME[b] for b in exprs if b in RENAME}
+    return tree.arrays(exprs, aliases=aliases or None,
+                       entry_start=start, entry_stop=stop, library="ak")
 
 
 # ---------------------------------------------------------------------------
@@ -469,32 +633,36 @@ def _split_simclusters(d, prefix, k, flip):
     return out
 
 
+# (MatchIdx, MatchQual, NumMatch, target collection) of the LayerCluster sim
+# matches. CaloParticles are not stored in the parquet, so their indices are
+# not remapped and still refer to the ORIGINAL event's CaloPart list.
+LC_MATCH_TRIPLETS = (
+    ('LayerCluster_SimCluster_MatchIdx', 'LayerCluster_SimCluster_MatchQual',
+     'LayerCluster_SimClusterNumMatch', 'SimCluster'),
+    ('LayerCluster_CaloPart_MatchIdx', 'LayerCluster_CaloPart_MatchQual',
+     'LayerCluster_CaloPartNumMatch', None),
+)
+
+
 def _split_layerclusters(d, keep, maps, flip):
     k = keep["LayerCluster"]
     nrow = ak.num(d["LayerCluster_x"])
-    out = {}
-    for f in ('LayerCluster_x', 'LayerCluster_y', 'LayerCluster_z',
-              'LayerCluster_eta', 'LayerCluster_phi', 'LayerCluster_energy',
-              'LayerCluster_nHits', 'LayerCluster_seedDetId'):
-        out[f] = d[f][k]
+    match_fields = {f for t in LC_MATCH_TRIPLETS for f in t[:3]}
+    # row-aligned columns in the usual order (x, y, z, eta, phi, energy, nHits,
+    # seedDetId), then the layer / algoID / time extras of the ticlnano schema
+    base = ('LayerCluster_x', 'LayerCluster_y', 'LayerCluster_z',
+            'LayerCluster_eta', 'LayerCluster_phi', 'LayerCluster_energy',
+            'LayerCluster_nHits', 'LayerCluster_seedDetId')
+    out = {f: d[f][k] for f in base if f in d.fields}
+    out.update({f: d[f][k] for f in d.fields if f not in out and f not in match_fields})
 
-    i, q, n = _split_matches(d['LayerCluster_SimCluster_MatchIdx'],
-                             d['LayerCluster_SimCluster_MatchQual'],
-                             d['LayerCluster_SimClusterNumMatch'],
-                             nrow, k, maps['SimCluster'])
-    out['LayerCluster_SimCluster_MatchIdx'] = i
-    out['LayerCluster_SimCluster_MatchQual'] = q
-    out['LayerCluster_SimClusterNumMatch'] = n
-
-    # CaloParticles are not stored in this file so the collection is not
-    # split; indices still refer to the ORIGINAL event's CaloPart list.
-    i, q, n = _split_matches(d['LayerCluster_CaloPart_MatchIdx'],
-                             d['LayerCluster_CaloPart_MatchQual'],
-                             d['LayerCluster_CaloPartNumMatch'],
-                             nrow, k, None)
-    out['LayerCluster_CaloPart_MatchIdx'] = i
-    out['LayerCluster_CaloPart_MatchQual'] = q
-    out['LayerCluster_CaloPartNumMatch'] = n
+    # sim-truth matches: optional (the TICL NanoAOD has none)
+    for idx_b, q_b, n_b, tgt in LC_MATCH_TRIPLETS:
+        if idx_b not in d.fields:
+            continue
+        i, q, n = _split_matches(d[idx_b], d[q_b], d[n_b], nrow, k,
+                                 maps.get(tgt) if tgt else None)
+        out[idx_b], out[q_b], out[n_b] = i, q, n
 
     if flip:
         out['LayerCluster_z'] = -out['LayerCluster_z']
@@ -591,10 +759,12 @@ def _split_tracksters(d, grp, keep_t, lc_map, flip):
     if flip:
         out[f"{grp}_barycenter_z"] = -out[f"{grp}_barycenter_z"]
         out[f"{grp}_barycenter_eta"] = -out[f"{grp}_barycenter_eta"]
+        if f"{grp}_eVector0_z" in out:   # PCA main axis (ticlnano extra)
+            out[f"{grp}_eVector0_z"] = -out[f"{grp}_eVector0_z"]
     return out
 
 
-def _split_simtracksters(d, grp, keep_t, lc_map, sc_map, flip):
+def _split_simtracksters(d, grp, keep_t, lc_map, sc_map, flip, cp_map=None):
     """SimTrackster tables: same as _split_tracksters (LC links remapped,
     endcap filter, barycenter mirrored) plus the seed index and the seed's
     boundary quantities.
@@ -605,9 +775,15 @@ def _split_simtracksters(d, grp, keep_t, lc_map, sc_map, flip):
     """
     out = _split_tracksters(d, grp, keep_t, lc_map, flip)
     seed_b, flag_b = f"{grp}_seedIndex", f"{grp}_seedIsCaloParticle"
-    if seed_b in d.fields and flag_b in d.fields:
+    if seed_b in d.fields and flag_b in d.fields and sc_map is not None:
         seed = d[seed_b]
         out[seed_b] = ak.where(d[flag_b], seed, _remap(seed, sc_map))[keep_t]
+    # ticlnano: caloParticleIdx is the row of the SimTrackster's CaloParticle,
+    # i.e. of its ticlSimTrackstersFromCPs entry; remap it into the split
+    # fromCPs collection so that it stays usable
+    cp_b = f"{grp}_caloParticleIdx"
+    if cp_b in d.fields and cp_map is not None:
+        out[cp_b] = _remap(d[cp_b], cp_map)[keep_t]
     if flip:
         # z-reflection: position z, eta and momentum z of the seed flip sign
         # (boundaryPhi is left alone: upstream it holds the eta value anyway)
@@ -680,7 +856,8 @@ def build_endcap(batch, side):
             if grp in keep}
 
     out = {}
-    out["RecHitHGC"] = _split_rechits(batch["RecHitHGC"], keep, maps, flip)
+    if "RecHitHGC" in keep:   # absent from the TICL NanoAOD (ticlnano)
+        out["RecHitHGC"] = _split_rechits(batch["RecHitHGC"], keep, maps, flip)
     # The merged SimCluster families are optional: MergedSimCluster is absent
     # from pileup samples (nanoML runMergedSimClusters=0, pepr's merger is not
     # pileup-aware), MergedCaloTruthMergedSimCluster from pre-20_1 files. The
@@ -688,17 +865,24 @@ def build_endcap(batch, side):
     for grp in ("MergedSimCluster", "MergedCaloTruthMergedSimCluster"):
         if grp in keep:
             out[grp] = _split_simclusters(batch[grp], grp, keep[grp], flip)
-    out["SimCluster"] = _split_simclusters(
-        batch["SimCluster"], "SimCluster", keep["SimCluster"], flip)
+    if "SimCluster" in keep:   # absent from the TICL NanoAOD (ticlnano)
+        out["SimCluster"] = _split_simclusters(
+            batch["SimCluster"], "SimCluster", keep["SimCluster"], flip)
     out["LayerCluster"] = _split_layerclusters(batch["LayerCluster"], keep, maps, flip)
     out["TICLCand"] = _split_ticlcands(batch["TICLCand"], keep["TICLCand"], flip)
+    if CAND_TRACKSTER_COLLECTION not in maps:
+        raise RuntimeError(
+            f"Candidate2Tracksters points into {CAND_TRACKSTER_COLLECTION}, which was not "
+            "read from this file (check --schema / CAND_TRACKSTER_COLLECTION)")
     out["Candidate2Tracksters"] = _split_candidates(
         batch["Candidate2Tracksters"], keep["TICLCand"],
         maps[CAND_TRACKSTER_COLLECTION])
-    for grp in ("ticlTrackstersCLUE3DHigh", "ticlTracksterLinks",
-                "ticlTrackstersRecovery"):
-        out[grp] = _split_tracksters(batch[grp], grp, keep[grp],
-                                     maps["LayerCluster"], flip)
+    # reco tracksters: Recovery exists in nanoML files only, Interpretations and
+    # the superclustering tracksters in ticlnano files only
+    for grp in TRACKSTER_GROUPS:
+        if grp in keep:
+            out[grp] = _split_tracksters(batch[grp], grp, keep[grp],
+                                         maps["LayerCluster"], flip)
 
     # --- MC truth: SimTracksters, sim candidates, reco<->sim associations ---
     # (all optional: skipped for files produced without the SimTrackster tables)
@@ -706,7 +890,8 @@ def build_endcap(batch, side):
         if grp in keep:
             out[grp] = _split_simtracksters(batch[grp], grp, keep[grp],
                                             maps["LayerCluster"],
-                                            maps["SimCluster"], flip)
+                                            maps.get("SimCluster"), flip,
+                                            cp_map=maps.get("ticlSimTrackstersFromCPs"))
 
     if ("ticlSimTrackstersFromCPs" in keep
             and _present(batch, "SimTICLCand", "SimTICLCand_eta")):
@@ -994,12 +1179,13 @@ def process_chunk(tree, start, stop):
     its two endcaps, and return the combined data (2 output events per input
     event, interleaved: [+z of ev0, -z of ev0, +z of ev1, ...])."""
     per_file = {}
-    for group_name, branches in BRANCH_GROUPS.items():
-        data = tree.arrays(filter_name=branches, entry_start=start, entry_stop=stop, library="ak")
+    for group_name in BRANCH_GROUPS:
+        data = read_group(tree, group_name, start, stop)
         if len(data.fields) == 0:
             # optional collection not in this file: MergedSimCluster for pileup
             # samples (nanoML runMergedSimClusters=0, pepr's SimClusterMerger is
-            # not pileup-aware), the SimTrackster tables for older files
+            # not pileup-aware), the SimTrackster tables for older files, RecHits
+            # and SimClusters for ticlnano files
             continue
 
         # Derive isPileup flag for SimCluster and MergedSimCluster:
@@ -1035,6 +1221,13 @@ def main():
 
     MLfileList = args.nanoMLfiles
 
+    # Input schema (nanoML or ticlnano): detected from the first file unless given
+    schema_name = args.schema
+    if schema_name == "auto":
+        with uproot.open(MLfileList[0])["Events"] as t0:
+            schema_name = detect_schema(t0)
+    configure_schema(schema_name)
+
     # Local directory or root://host//path (see make_output); fails early if
     # the remote file exists or the python lacks XRootD support.
     output = make_output(args.outputDir, args.outputFile, args.stage_dir, args.overwrite)
@@ -1047,10 +1240,13 @@ def main():
 
     print(f"Processing {n_files} nanoML files in chunks of {step_size} events"
           + (f" (first {args.max_events} events per file)" if args.max_events else ""))
+    print(f"Input schema: {SCHEMA}" + (" (TICL NanoAOD: branches renamed to the nanoML names; "
+          "no RecHit / SimCluster / MergedSimCluster tables)" if SCHEMA == "ticlnano" else ""))
     print(f"Collections: {', '.join(BRANCH_GROUPS.keys())}")
     print(f"Derived fields: SimCluster_isPileup, MergedSimCluster_isPileup, "
           f"MergedCaloTruthMergedSimCluster_isPileup, "
-          f"ticlSimTracksters_seedIsCaloParticle, ticlSimTrackstersFromCPs_seedIsCaloParticle")
+          f"ticlSimTracksters_seedIsCaloParticle, ticlSimTrackstersFromCPs_seedIsCaloParticle"
+          " (each when its inputs exist)")
     print(f"Endcap split: 2 output events per input event "
           f"(-z endcap mirrored via z->-z, eta->-eta)")
     print(f"Candidate links assumed to point into: {CAND_TRACKSTER_COLLECTION}")
@@ -1063,6 +1259,9 @@ def main():
     try:
         for i, f in enumerate(MLfileList):
             with uproot.open(f)["Events"] as tree:
+                if detect_schema(tree) != SCHEMA:
+                    raise RuntimeError(f"{f} is a {detect_schema(tree)} file but this conversion "
+                                       f"uses the {SCHEMA} schema: convert the two kinds separately")
                 chunks = list(_iter_chunks(tree, step_size, args.max_events))
                 print(f"\nFile {i+1}/{n_files}: {f} ({tree.num_entries} events, {len(chunks)} chunks)")
                 for start, stop in tqdm(chunks, desc="  chunks", leave=False):

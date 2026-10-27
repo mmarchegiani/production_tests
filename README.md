@@ -313,6 +313,48 @@ therefore iterate the file row group by row group
 (`ak.from_parquet(file, row_groups=[...])`). `--max_events N` converts
 only the first N events of each file, for quick tests.
 
+### Converting the upstream TICL NanoAOD (`--schema ticlnano`)
+
+Both converters also read the upstream CMSSW TICL NanoAOD, e.g. the TICL v6
+hackathon files (CMSSW_20_1_0_pre4, D121, 200 pileup) under
+`/eos/cms/store/group/dpg_hgcal/comm_hgcal/wredjeb/CMSSW_20_1_0_pre4_ticlv6/<sample>/<sample>_D121/step3_inNANOAODSIM/`
+(100 events per file). The flavour is detected from the first file (`--schema
+auto`, or force `nanoML` / `ticlnano`); the branches are renamed to the nanoML
+names as they are read, so the parquet columns are the usual ones
+(`LayerCluster_*`, `TICLCand_*`, `ticlTrackstersCLUE3DHigh_*`,
+`ticlSimTrackstersFromCPs_*`, `CLUE3DHighToSimTSByHits`, ...). Differences
+with respect to a nanoML conversion:
+
+- no `RecHitHGC`, `SimCluster`, `MergedSimCluster`,
+  `MergedCaloTruthMergedSimCluster` groups and no LayerCluster sim matches:
+  those tables do not exist upstream, so the RecHit-level trainings cannot use
+  these files (the `_full` sibling folders hold the RECO with RecHits and
+  SimClusters, from which `nanoML_cfg.py` could be run instead);
+- no `ticlTrackstersRecovery` and no `ByLCs` association tables; instead the
+  TICL v6 `ticlTracksterInterpretations` and
+  `ticlTracksterLinksSuperclusteringDNN` tracksters with their `ByHits`
+  associations (`InterpretationsToSimTSByHits`, `SuperclusteringDNNToSimTSCPByHits`, ...);
+  `Candidate2Tracksters` points into `ticlTracksterInterpretations`;
+- SimTracksters carry no `seedIndex` / `seedProductId` / `seedIsCaloParticle`
+  but `caloParticleIdx` (the row of the SimTrackster's CaloParticle, i.e. of
+  its `ticlSimTrackstersFromCPs` entry, remapped by the split; -1 when upstream
+  has none or when the CaloParticle's own entry lies in the other endcap) and `isPU`; the trackster PCA shape (`EV1..3`, `eVector0_*`)
+  and the LayerCluster `layer`, `algoID`, `correctedEnergy`, `time`,
+  `timeError` are added.
+
+A 100-event file converts in ≈ 1 min (2.6 GB RSS for one 100-event chunk) into
+≈ 350 MB of split parquet, ≈ 3.5 MB per input event: the PU-200 LayerClusters
+dominate. The nanoML output is unchanged (byte-identical to the previous version).
+
+```shell
+# one file by hand (apptainer image or LCG python as for nanoML files; bind /eos/cms into the container)
+python3 root_to_parquet-split.py --nanoMLfiles /eos/cms/.../step3_inNANOAODSIM/step3_inNANOAODSIM_1440986_0.root \
+    --outputDir out --outputFile step3_inNANOAODSIM_1440986_0_split.parquet
+# the whole folder on condor, one parquet per file (see the parquet DAG below)
+condor/submit_parquet.sh --indir /eos/cms/.../SinglePiPt25Eta1p7_2p7_D121/step3_inNANOAODSIM --pattern 'step3_inNANOAODSIM_*.root' \
+    --outdir root://cmsdata.phys.cmu.edu//store/group/hgcal-ml-reconstruction/training_datasets/<dataset> --workdir ~/condor/<dataset>/parquet
+```
+
 ## One-shot pipeline scripts
 
 For a quick single-particle-type campaign, [`scripts/`](scripts/)
