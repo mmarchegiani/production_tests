@@ -18,7 +18,7 @@ cmsrel $version
 cd $version/src
 cmsenv
 git cms-init -y
-git cms-rebase-topic felicepantaleo:ticlv6-20_1_0_pre4
+git cms-rebase-topic mmarriot:ticlv6-cluestering-wip # Get latest TICLv6 branch with CLUEstering from Max
 git cms-merge-topic mmarchegiani:flatetagun-20_1_0_pre4 # Add particle gun shooting with flat eta distribution
 scram b -j 8
 
