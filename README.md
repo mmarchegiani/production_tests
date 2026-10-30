@@ -23,7 +23,7 @@ git cms-merge-topic mmarchegiani:flatetagun-20_1_0_pre4 # Add particle gun shoot
 scram b -j 8
 
 # Reco fragments
-git clone git@github.com:dgaytanv/reco-prodtools.git reco_prodtools
+git clone git@github.com:mmarchegiani/reco-prodtools.git reco_prodtools
 cd reco_prodtools/templates/python
 ./produceSkeletons_D128.sh
 cd ../../..
