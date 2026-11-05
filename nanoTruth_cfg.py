@@ -3,16 +3,25 @@
 # Reads a RECO.py output and writes a flat NanoAOD file with the TICL tracksters, the
 # TICL candidates, the layer clusters, the GEN particles, the legacy SimTrackster truth
 # with its reco<->sim association tables, and the calo-boundary truth of the MC-truth
-# graph: the TruthCB particle table and the CLUE3DHigh/LayerCluster <-> TruthCB
-# association tables (PhysicsTools/TruthInfo/python/truthNanoTables_cff.py).
+# graph: the TruthCB particle table and the CLUEstering/Interpretations/LayerCluster <->
+# TruthCB association tables (the layout of PhysicsTools/TruthInfo/python/truthNanoTables_cff.py).
 #
 # Unlike nanoML_cfg.py it needs nothing from the pepr branch (no DPGAnalysis pepr tables,
 # no hgcSimTruth), so it runs in an area that carries only the TICLv6 + truth-graph
 # packages. It writes no RecHit, SimCluster or MergedSimCluster tables; the parquet
 # scripts treat those groups as optional. Table names follow nanoML_cfg.py so the parquet
-# groups are the same (LayerCluster, ticlTrackstersCLUE3DHigh, ticlSimTracksters, ...).
+# groups are the same (LayerCluster, ticlTrackstersCLUEstering, ticlSimTracksters, ...).
 # The TICL blocks are copies of the nanoML_cfg.py ones: nanoML_cfg.py cannot be imported
 # here, it loads the pepr content at import time.
+#
+# TICLv6 only. The input must be a RECO.py useTICL=1 file: first iteration
+# ticlTrackstersCLUEstering (the CLUEstering algorithm on the device), final tracksters
+# ticlTracksterInterpretations, ticlCandidate holding the candidates only. Every input file
+# is checked for these two collections at configuration time and the job refuses to start
+# otherwise: a TICLv5 file (ticlTrackstersCLUE3DHigh, ticlCandidate tracksters) is an error,
+# never a fallback. The trackster tables and the reco <-> sim and reco <-> truth association
+# tables are built for the first iteration, the links and the interpretations, with the
+# short names CLUEstering, Links, Interpretations.
 
 import FWCore.ParameterSet.Config as cms
 from FWCore.ParameterSet.VarParsing import VarParsing
@@ -31,6 +40,49 @@ options.register("runPFTruth", 0, VarParsing.multiplicity.singleton, VarParsing.
 options.register("runMergedSimClusters", 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "ignored (nanoML_cfg.py compatibility)")
 options.parseArguments()
+
+# The TICLv6 trackster collections and their short names in the association tables.
+_ticlFirstIteration = "ticlTrackstersCLUEstering"
+_ticlFinalTracksters = "ticlTracksterInterpretations"
+_ticlIterLabels = ["ticlTrackstersCLUEstering", "ticlTrackstersRecovery", "ticlTracksterLinks",
+                   "ticlTracksterLinksSuperclusteringDNN", "ticlTracksterInterpretations"]
+_ticlShortNames = {"ticlTrackstersCLUEstering": "CLUEstering", "ticlTracksterLinks": "Links",
+                   "ticlTracksterInterpretations": "Interpretations"}
+
+
+def _requireTICLv6Input(fileNames):
+    """Refuse to configure unless every input file carries the TICLv6 tracksters: the branches
+    ticlTracksters_<label>_*_* of the first iteration and of the interpretation stage. A file
+    without them (a TICLv5 file, for one) would give empty tables instead of an error at run
+    time, since the tables skip a missing source, so the check is made here and raises."""
+    if not fileNames:
+        raise RuntimeError("nanoTruth_cfg.py: no input file given (inputFiles=...), "
+                           "so the TICLv6 tracksters cannot be checked")
+    import ROOT
+    for fileName in fileNames:
+        path = str(fileName)
+        if path.startswith("file:"):
+            path = path[len("file:"):]
+        try:
+            inputFile = ROOT.TFile.Open(path)
+        except OSError:  # recent ROOT raises instead of returning a null file
+            inputFile = None
+        if not inputFile or inputFile.IsZombie():
+            raise RuntimeError(f"nanoTruth_cfg.py: cannot open the input file {fileName} "
+                               "to check for the TICLv6 tracksters")
+        events = inputFile.Get("Events")
+        branches = [branch.GetName() for branch in events.GetListOfBranches()] if events else []
+        inputFile.Close()
+        missing = [label for label in (_ticlFirstIteration, _ticlFinalTracksters)
+                   if not any(name.startswith(f"ticlTracksters_{label}_") for name in branches)]
+        if missing:
+            raise RuntimeError(
+                f"nanoTruth_cfg.py: the input file {fileName} is not a TICLv6 RECO file: it has no "
+                + " and no ".join(missing)
+                + " tracksters. This config reads TICLv6 only; produce the input with RECO.py useTICL=1")
+
+
+_requireTICLv6Input(options.inputFiles)
 
 process.load('Configuration.StandardSequences.Services_cff')
 process.load('SimGeneral.HepPDTESSource.pythiapdt_cfi')
@@ -137,9 +189,12 @@ process.ticlCandidateTable = cms.EDProducer("TICLCandidateTableProducer",
         timeError=Var("timeError", "float", doc="HGCAL time error"),
     ),
 )
+# The tracksters the candidates point to: the final tracksters of the interpretation stage
+# (Candidate2TrackstersIndices index that table).
+_ticlCandidateTracksters = _ticlFinalTracksters
 process.ticlCandidateExtraTable = cms.EDProducer("TICLCandidateExtraTableProducer",
     src=cms.InputTag("ticlCandidate"),
-    tracksters=cms.InputTag("ticlCandidate"),
+    tracksters=cms.InputTag(_ticlCandidateTracksters),
     tracks=cms.InputTag("generalTracks"),
     name=cms.string("TICLCand"),
     skipNonExistingSrc=cms.bool(True),
@@ -147,7 +202,7 @@ process.ticlCandidateExtraTable = cms.EDProducer("TICLCandidateExtraTableProduce
     collectionVariables=cms.PSet(
         tracksters=cms.PSet(
             name=cms.string("Candidate2TrackstersIndices"),
-            doc=cms.string("Tracksters linked to TICLCandidates"),
+            doc=cms.string("Tracksters linked to TICLCandidates (index into the %s table)" % _ticlCandidateTracksters),
             useCount=cms.bool(True),
             useOffset=cms.bool(False),
             variables=cms.PSet(),
@@ -198,8 +253,6 @@ def _tracksterTable(name, src, doc):
         ),
     )
 
-_ticlIterLabels = ["ticlTrackstersCLUE3DHigh", "ticlTrackstersRecovery",
-                   "ticlTracksterLinks", "ticlTracksterLinksSuperclusteringDNN"]
 _ticlTableProducers = []
 for _iterLabel in _ticlIterLabels:
     setattr(process, _iterLabel + "Table", _tracksterTable(_iterLabel, cms.InputTag(_iterLabel), _iterLabel))
@@ -256,7 +309,8 @@ process.ticlSimCandidateExtraTable = process.ticlCandidateExtraTable.clone(
     ),
 )
 
-_simAssocRecoLabels = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links"}
+# CLUEstering, Links and Interpretations.
+_simAssocRecoLabels = {_label: _ticlShortNames[_label] for _label in _ticlIterLabels if _label in _ticlShortNames}
 _simAssocSimLabels = {"ticlSimTracksters": "SimTS", "ticlSimTrackstersfromCPs": "SimTSCP"}
 _simAssocTypes = ["ByHits", "ByLCs"]
 
@@ -302,22 +356,28 @@ for _recoLabel, _recoShort in _simAssocRecoLabels.items():
 # ---------------------------------------------------------------------------
 process.load("PhysicsTools.TruthInfo.truthNanoTables_cff")
 
-# The adaptive working points of the reco -> truth maps. truthNanoTables_cff writes the
-# Fixed map (every match, best first) and TruthToReco; the adaptive points keep one match
-# per reco object. Each <A> table below is a count/offset table with its <A>Links table.
+# The reco -> truth maps at each working point: Fixed keeps every match, best first; the
+# adaptive points keep one match per reco object. Plus the truth -> reco map. Each <A> table
+# below is a count/offset table with its <A>Links table.
 #   calo-boundary (RECO.py truthAssoc=1): links index TruthCB, candidates are boundary
 #     particles only, so an adaptive point picks the best one and cannot climb.
 #   full graph (RECO.py truthFullGraph=1): links index TruthFG, the particles a reco object
 #     may be assigned to (truthBranchTargets "assignableRoots") with HGCAL sim energy, so
 #     an adaptive point can answer with an ancestor of the boundary particles.
 # A RECO file without the full-graph maps gets empty TruthFG tables (skipNonExistingSrc).
+# truthNanoTables_cff writes the Fixed and TruthToReco calo-boundary tables for
+# ticlTrackstersCLUE3DHigh and the layer clusters; they are generated here instead, for the
+# trackster collections of this input, so only its TruthCB particle table is scheduled.
 from PhysicsTools.TruthInfo.truthParticleFlatTable_cfi import truthParticleFlatTable
 from PhysicsTools.TruthInfo.truthBranchAssociationFlatTable_cfi import truthBranchAssociationFlatTable
 
 _adaptiveWorkingPoints = ["AdaptiveTight", "AdaptiveNominal"]
-# reco short name -> (associator module suffix, reco collection label)
+# reco short name -> (associator module suffix, reco collection label): the first TICL
+# iteration, the final tracksters and the layer clusters (the RECO.py calo-boundary
+# associators cover exactly these; the full-graph ones cover every trackster collection).
 _truthAssocRecos = {
-    "CLUE3DHigh": ("TracksterAssociators", "ticlTrackstersCLUE3DHigh"),
+    _ticlShortNames[_ticlFirstIteration]: ("TracksterAssociators", _ticlFirstIteration),
+    _ticlShortNames[_ticlFinalTracksters]: ("TracksterAssociators", _ticlFinalTracksters),
     "LayerCluster": ("LayerClusterAssociators", "hgcalMergeLayerClusters"),
 }
 
@@ -329,41 +389,36 @@ process.ticlTruthFGTable = truthParticleFlatTable.clone(
         "with HGCAL sim energy; boundary columns are zero when hasBoundary is false",
 )
 
+# truth short name -> (associator module prefix, particle table, what an adaptive point answers)
+_truthLevels = {
+    "TruthCB": ("truthCaloBoundary", "ticlTruthCBTable", "the best calo-boundary particle"),
+    "TruthFG": ("truthBranch", "ticlTruthFGTable", "one particle, the adaptive climb may answer with an ancestor"),
+}
 _truthAssocTableProducers = [process.ticlTruthFGTable]
 for _recoShort, (_assocSuffix, _recoLabel) in _truthAssocRecos.items():
-    # Calo-boundary: the adaptive points next to the Fixed table of truthNanoTables_cff.
-    for _wp in _adaptiveWorkingPoints:
-        _name = f"{_recoShort}ToTruthCB{_wp}"
+    for _truthShort, (_assocPrefix, _targetsTable, _adaptiveDoc) in _truthLevels.items():
+        # reco -> truth: Fixed and the adaptive points
+        for _wp in ["Fixed"] + _adaptiveWorkingPoints:
+            _name = f"{_recoShort}To{_truthShort}" + ("" if _wp == "Fixed" else _wp)
+            setattr(process, f"ticlTruthAssoc{_name}Table", truthBranchAssociationFlatTable.clone(
+                src=cms.InputTag(f"{_assocPrefix}{_assocSuffix}", f"{_recoLabel}RecoToTruth{_wp}"),
+                targets=cms.InputTag(_targetsTable, "selected"),
+                direction="recoToTruth",
+                name=_name,
+                doc=f"{_recoLabel} -> {_truthShort}, {_wp} working point: "
+                    + ("every particle sharing energy, best first" if _wp == "Fixed" else _adaptiveDoc),
+            ))
+            _truthAssocTableProducers.append(getattr(process, f"ticlTruthAssoc{_name}Table"))
+        # truth -> reco
+        _name = f"{_truthShort}To{_recoShort}"
         setattr(process, f"ticlTruthAssoc{_name}Table", truthBranchAssociationFlatTable.clone(
-            src=cms.InputTag(f"truthCaloBoundary{_assocSuffix}", f"{_recoLabel}RecoToTruth{_wp}"),
-            targets=cms.InputTag("ticlTruthCBTable", "selected"),
-            direction="recoToTruth",
+            src=cms.InputTag(f"{_assocPrefix}{_assocSuffix}", f"{_recoLabel}TruthToReco"),
+            targets=cms.InputTag(_targetsTable, "selected"),
+            direction="truthToReco",
             name=_name,
-            doc=f"{_recoLabel} -> TruthCB, {_wp} working point: the best calo-boundary particle",
+            doc=f"{_truthShort} -> {_recoLabel}: every reco object sharing energy, best first",
         ))
         _truthAssocTableProducers.append(getattr(process, f"ticlTruthAssoc{_name}Table"))
-    # Full graph: Fixed, the adaptive points and TruthToReco.
-    for _wp in ["Fixed"] + _adaptiveWorkingPoints:
-        _name = f"{_recoShort}ToTruthFG" + ("" if _wp == "Fixed" else _wp)
-        setattr(process, f"ticlTruthAssoc{_name}Table", truthBranchAssociationFlatTable.clone(
-            src=cms.InputTag(f"truthBranch{_assocSuffix}", f"{_recoLabel}RecoToTruth{_wp}"),
-            targets=cms.InputTag("ticlTruthFGTable", "selected"),
-            direction="recoToTruth",
-            name=_name,
-            doc=f"{_recoLabel} -> TruthFG, {_wp} working point"
-                + (": every assignable particle sharing energy, best first" if _wp == "Fixed"
-                   else ": one particle, the adaptive climb may answer with an ancestor"),
-        ))
-        _truthAssocTableProducers.append(getattr(process, f"ticlTruthAssoc{_name}Table"))
-    _name = f"TruthFGTo{_recoShort}"
-    setattr(process, f"ticlTruthAssoc{_name}Table", truthBranchAssociationFlatTable.clone(
-        src=cms.InputTag(f"truthBranch{_assocSuffix}", f"{_recoLabel}TruthToReco"),
-        targets=cms.InputTag("ticlTruthFGTable", "selected"),
-        direction="truthToReco",
-        name=_name,
-        doc=f"TruthFG -> {_recoLabel}: every reco object sharing energy, best first",
-    ))
-    _truthAssocTableProducers.append(getattr(process, f"ticlTruthAssoc{_name}Table"))
 
 process.nanoTruthTask = cms.Task(
     process.nanoMetadata,
@@ -377,7 +432,7 @@ process.nanoTruthTask = cms.Task(
     process.ticlSimCandidateTable,
     process.ticlSimCandidateExtraTable,
     *_simAssocTableProducers,
-    process.truthNanoTablesTask,
+    process.ticlTruthCBTable,
     *_truthAssocTableProducers,
 )
 process.nanoAOD_step = cms.Path(process.nanoTruthTask)

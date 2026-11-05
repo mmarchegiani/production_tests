@@ -13,7 +13,9 @@ options.register('outputFileDQM', 'file:partGun_PDGid22_x96_Pt1.0To100.0_DQM_1.r
 options.register("nThreads", 1, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "number of threads")
 options.register("useTICL", 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
-    "use TICL v6 (1=True, 0=False)")
+    "use TICL v6 (1=True, 0=False): the ticl_v6 process modifier, whose first iteration is "
+    "CLUEstering (ticlTrackstersCLUEstering replaces ticlTrackstersCLUE3DHigh) and whose final "
+    "tracksters are ticlTracksterInterpretations (ticlCandidate then holds the candidates only)")
 options.register("truthAssoc", 1, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "associate ticlTrackstersCLUE3DHigh and hgcalMergeLayerClusters to the calo-boundary "
     "particles of the MC-truth graph (1=True, 0=False)")
@@ -27,6 +29,19 @@ if options.useTICL:
     from reco_prodtools.templates.RECO_ticl_v6_fragment import process  
 else:
     from reco_prodtools.templates.RECO_fragment import process
+
+# The TICL trackster collections of this reconstruction, as the fragment's process modifiers
+# set them (v5: CLUE3DHigh, Links, Candidate, SuperclusteringDNN; v6: CLUEstering, Links,
+# Interpretations, SuperclusteringDNN). The stock sim associators are built from the same
+# list; the truth-graph associators below are keyed on it too.
+from RecoTICL.Configuration.iterativeTICL_cff import ticlIterLabelsPSet
+_ticlIterLabels = list(ticlIterLabelsPSet.labels)
+# The first (pattern-recognition) iteration: ticlTrackstersCLUE3DHigh or ticlTrackstersCLUEstering.
+_ticlFirstIteration = next(l for l in _ticlIterLabels if l.startswith("ticlTracksters"))
+# The final tracksters: ticlTracksterInterpretations in v6. In v5 they are the ticlCandidate
+# ones, which the calo-boundary truth has never covered.
+_ticlFinalTracksters = ("ticlTracksterInterpretations"
+                        if "ticlTracksterInterpretations" in _ticlIterLabels else None)
 
 process.maxEvents.input = cms.untracked.int32(options.maxEvents)
 
@@ -126,14 +141,15 @@ process.recosim_step *= process.simTracksters
 # never rebuilt: a graph rebuilt at RECO would be signal-only (cms-truth docs, "Consume,
 # do not rebuild"), so the guard below refuses a process that carries the producers.
 #
-# truthCaloBoundaryAssociators_cff matches ticlTrackstersCLUE3DHigh and
-# hgcalMergeLayerClusters to the calo-boundary particles (truth::Level::CaloBoundary, one
-# per outward tracker->calorimeter crossing, the SimCluster analogue; signal and in-time
-# pile-up). Products, read by the nano step:
+# truthCaloBoundaryAssociators_cff matches the first TICL iteration (ticlTrackstersCLUE3DHigh
+# in v5, ticlTrackstersCLUEstering in v6), in v6 also the final tracksters
+# (ticlTracksterInterpretations), and hgcalMergeLayerClusters to the calo-boundary particles
+# (truth::Level::CaloBoundary, one per outward tracker->calorimeter crossing, the SimCluster
+# analogue; signal and in-time pile-up). Products, read by the nano step:
 #   truthBranchTargetsCaloBoundary          "truthToRecoTargetsCaloBoundary": the target ids
-#   truthCaloBoundaryTracksterAssociators   "ticlTrackstersCLUE3DHighRecoToTruth{Fixed,
-#                                           AdaptiveTight,AdaptiveNominal}" and
-#                                           "ticlTrackstersCLUE3DHighTruthToReco"
+#   truthCaloBoundaryTracksterAssociators   "<label>RecoToTruth{Fixed,AdaptiveTight,
+#                                           AdaptiveNominal}" and "<label>TruthToReco" for
+#                                           each trackster label above
 #   truthCaloBoundaryLayerClusterAssociators the same four for hgcalMergeLayerClusters
 # ---------------------------------------------------------------------------
 for _m in ("truthGraphProducer", "truthLogicalGraphProducer", "truthLogicalGraphHitIndexProducer"):
@@ -143,6 +159,11 @@ for _m in ("truthGraphProducer", "truthLogicalGraphProducer", "truthLogicalGraph
 
 if options.truthAssoc:
     process.load("SimGeneral.TruthGraphAssociatorProducers.truthCaloBoundaryAssociators_cff")
+    # The cff targets ticlTrackstersCLUE3DHigh, which TICLv6 does not run (the producer reads
+    # its inputs with event.get, so a missing collection aborts the job): match the first
+    # iteration of this reconstruction and, in v6, the final tracksters.
+    process.truthCaloBoundaryTracksterAssociators.recoCollections = cms.VInputTag(*[
+        cms.InputTag(_label) for _label in [_ticlFirstIteration, _ticlFinalTracksters] if _label])
     process.truthAssoc = cms.Sequence(process.truthCaloBoundaryAssociatorsSequence)
     process.recosim_step *= process.truthAssoc
 
@@ -157,7 +178,7 @@ if options.truthFullGraph:
     from SimGeneral.TruthGraphAssociatorProducers.truthGraphAssociationLabels_cff import tracksterLabelsFromProcess
     from SimGeneral.TruthGraphAssociatorProducers.truthGraphAssociators_cff import (
         truthBranchTargets, truthBranchTracksterAssociators, truthBranchLayerClusterAssociators)
-    _tracksterLabels = tracksterLabelsFromProcess(process) or ["ticlTrackstersCLUE3DHigh"]
+    _tracksterLabels = tracksterLabelsFromProcess(process) or [_ticlFirstIteration]
     # Pile-up particles are level targets too and no pt floor, as for the calo-boundary
     # targets (the stock defaults are the signal-only validation denominators).
     process.truthBranchTargets = truthBranchTargets.clone(
@@ -213,6 +234,15 @@ process.FEVTDEBUGoutput.outputCommands.extend(["keep *_MergedTrackTruth_*_*",
     "keep *_truthBranchTargets_*_*",
     "keep *_truthBranchTracksterAssociators_*_*",
     "keep *_truthBranchLayerClusterAssociators_*_*",
+    # TICLv6 (useTICL=1). The CLUEstering iteration is matched by ticlTracksters* above; the
+    # interpretation stage is kept by the TICL event content, which then drops its
+    # per-trackster species and type probabilities (they serve ticlCandidate in the same job).
+    # Kept again here (last match wins) as the PID of the final tracksters. The device-side
+    # CLUEstering products (hgcalSoARecHits*, hgcalCLUEstering*, hgcalSoALayerClusters*,
+    # hgcalSoAMergeLayerClusters, ticlCLUEstering, ticlSoATracksters) stay dropped: their
+    # content is the one of hgcalMergeLayerClusters and ticlTrackstersCLUEstering.
+    "keep *_ticlTrackstersCLUEstering_*_*",
+    "keep *_ticlTracksterInterpretations_*_*",
     # MC-truth tracksters and their associations (see block above). The
     # FEVTDEBUG content already lists most of these;
     # they are repeated here so the file documents what nanoML relies on.
