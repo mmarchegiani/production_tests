@@ -214,6 +214,7 @@ run_chain() {
     local RUN_PFTRUTH=0 DO_PARQUET=1 SPLIT=0
     RESUME=0
     DRY_RUN=0
+    USE_TICL=0
     local PARQUET_IMAGE="${PARQUET_IMAGE:-$DEFAULT_PARQUET_IMAGE}"
 
     # ---- argument parsing ----------------------------------------------
@@ -443,3 +444,4 @@ run_chain() {
 
     echo "✅ All steps completed successfully!"
     echo "All files have been saved to: $OUTPUT_DIR"
+}
