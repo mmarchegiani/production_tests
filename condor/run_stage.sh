@@ -20,6 +20,13 @@
 #   nminbias=N       minbias events to generate for the PU library (default nevents)
 #   finecalo=0|1     useFineCalo for GSD_GUN.py (default 0)
 #   gun=NAME         particle gun for GSD_GUN.py: flatEta (default) or closeBy
+#   nparticles=N     particles per gun shot (GSD_GUN.py nParticles; default 1)
+#   delta=X          closeBy gun only: separation in cm between consecutive particles
+#                    on the HGCal front face (GSD_GUN.py delta; default 10, the
+#                    producer's own). Rejected with gun=flatEta.
+#   ticl=0|1         RECO.py useTICL: 1 = TICLv6 (ticl_v6 modifier: CLUEstering first
+#                    iteration, Interpretations final tracksters), which the default
+#                    nanoTruth_cfg.py requires; 0 = TICLv5 (default)
 #   nthreads=N       threads for every cmsRun step (default 1)
 #   keep=LIST        chain only: comma-separated subset of minbias,gsd,reco,nano
 #                    to stage out (default nano)
@@ -31,12 +38,15 @@
 #                    (default $CMSSW_BASE/src/production_tests)
 #
 # Outputs land in <outdir>/{MINBIAS,GSD,RECO,nanoML}/ as
-#   <partname>_<stdCalo|fineCalo>[_PU<N>]_E<min>[to<max>]_rep<N>_<STEP>.root
+#   <partname>_<stdCalo|fineCalo>[_PU<N>]_E<min>[to<max>][_closeBy_n<N>_d<delta>cm|_n<N>][_ticlv6]_rep<N>_<STEP>.root
+# (the closeBy tag carries nparticles and delta with '.' written as 'p', e.g. d0p5cm;
+# flatEta adds _n<N> only when nparticles != 1; _ticlv6 marks ticl=1).
 set -eu -o pipefail
 
 STAGE=""; PARTICLE=""; PARTNAME=""; MINE=20.0; MAXE=200.0; ENERGY=""
 SEED=""; REPLICA=""; NEVENTS=""; OUTDIR=""; PILEUP=0; NMINBIAS=""
 FINECALO=0; GUN=flatEta; NTHREADS=1; KEEP="nano"; CMSSW=""; PRODTESTS=""
+NPARTICLES=1; DELTA=""; TICL=0
 
 for kv in "$@"; do
     key="${kv%%=*}"; val="${kv#*=}"
@@ -55,6 +65,9 @@ for kv in "$@"; do
         nminbias)   NMINBIAS="$val" ;;
         finecalo)   FINECALO="$val" ;;
         gun)        GUN="$val" ;;
+        nparticles) NPARTICLES="$val" ;;
+        delta)      DELTA="$val" ;;
+        ticl)       TICL="$val" ;;
         nthreads)   NTHREADS="$val" ;;
         keep)       KEEP="$val" ;;
         cmssw)      CMSSW="$val" ;;
@@ -68,6 +81,12 @@ for var in STAGE PARTICLE PARTNAME SEED REPLICA NEVENTS OUTDIR; do
 done
 if [ -n "$ENERGY" ]; then MINE="$ENERGY"; MAXE="$ENERGY"; fi
 [ -n "$NMINBIAS" ] || NMINBIAS="$NEVENTS"
+case "$GUN" in
+    flatEta) [ -z "$DELTA" ] || { echo "ERROR: delta= applies to gun=closeBy only" >&2; exit 1; } ;;
+    closeBy) [ -n "$DELTA" ] || DELTA=10 ;;
+    *) echo "ERROR: gun must be flatEta or closeBy (got '$GUN')" >&2; exit 1 ;;
+esac
+case "$TICL" in 0|1) ;; *) echo "ERROR: ticl must be 0 or 1 (got '$TICL')" >&2; exit 1 ;; esac
 # pepr's SimClusterMerger (hgcSimTruth -> MergedSimCluster tables) is not pileup-aware
 # (it throws on the first pileup SimCluster), so nanoML drops it for PU samples.
 RUN_MERGED_SC=1; [ "$PILEUP" -gt 0 ] && RUN_MERGED_SC=0
@@ -83,6 +102,13 @@ CALO="stdCalo"; [ "$FINECALO" -eq 1 ] && CALO="fineCalo"
 SAMPLE="${PARTNAME}_${CALO}"
 [ "$PILEUP" -gt 0 ] && SAMPLE="${SAMPLE}_PU${PILEUP}"
 SAMPLE="${SAMPLE}_${ETAG}"
+dtag() { printf "%g" "$1" | tr . p; }
+if [ "$GUN" = closeBy ]; then
+    SAMPLE="${SAMPLE}_closeBy_n${NPARTICLES}_d$(dtag "$DELTA")cm"
+elif [ "$NPARTICLES" -ne 1 ]; then
+    SAMPLE="${SAMPLE}_n${NPARTICLES}"
+fi
+[ "$TICL" -eq 1 ] && SAMPLE="${SAMPLE}_ticlv6"
 case "$REPLICA" in
     ''|*[!0-9]*) REPTAG="$REPLICA" ;;
     *)           REPTAG="rep${REPLICA}" ;;
@@ -100,7 +126,7 @@ NANO_OUT="${TAG}_nanoML.root"
 
 echo "=== $(hostname) $(date -u +%FT%TZ) STAGE=$STAGE TAG=$TAG ==="
 echo "    particle=$PARTICLE  E=[$MINE,$MAXE] GeV  seed=$SEED  nevents=$NEVENTS  pileup=$PILEUP  nminbias=$NMINBIAS"
-echo "    finecalo=$FINECALO  gun=$GUN  nthreads=$NTHREADS  keep=$KEEP"
+echo "    finecalo=$FINECALO  gun=$GUN  nparticles=$NPARTICLES  delta=${DELTA:-n/a}  ticl=$TICL  nthreads=$NTHREADS  keep=$KEEP"
 echo "    outdir=$OUTDIR"
 echo "    sandbox=$PWD"
 echo
@@ -188,15 +214,17 @@ run_minbias() {
 run_gsd() {
     echo "--- GSD $(date -u +%FT%TZ): $NEVENTS events, seed=$SEED"
     local args=(seed="$SEED" particle="$PARTICLE" minE="$MINE" maxE="$MAXE"
-                useFineCalo="$FINECALO" gun="$GUN" maxEvents="$NEVENTS" nThreads="$NTHREADS"
+                useFineCalo="$FINECALO" gun="$GUN" nParticles="$NPARTICLES"
+                maxEvents="$NEVENTS" nThreads="$NTHREADS"
                 pileup="$PILEUP" outputFile="$GSD_OUT")
+    [ -n "$DELTA" ] && args+=(delta="$DELTA")
     [ "$PILEUP" -gt 0 ] && args+=(pu="$MINBIAS_OUT")
     "${TIME[@]}" cmsRun "$CFG_DIR/GSD_GUN.py" "${args[@]}"
     check_out "$GSD_OUT"
 }
 run_reco() {
     echo "--- RECO $(date -u +%FT%TZ)"
-    "${TIME[@]}" cmsRun "$CFG_DIR/RECO.py" nThreads="$NTHREADS" \
+    "${TIME[@]}" cmsRun "$CFG_DIR/RECO.py" nThreads="$NTHREADS" useTICL="$TICL" \
         inputFiles="file:${GSD_OUT}" outputFile="$RECO_OUT" outputFileDQM="$DQM_OUT"
     rm -f "$DQM_OUT"
     check_out "$RECO_OUT"

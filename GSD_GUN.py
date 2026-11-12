@@ -33,12 +33,22 @@ options.register("pu", "", VarParsing.multiplicity.singleton, VarParsing.varType
     "required when pileup>0.")
 options.register("gun", "flatEta", VarParsing.multiplicity.singleton, VarParsing.varType.string,
     "particle gun: flatEta (from the origin, nParticles into each endcap, |eta| 1.5-3.0) "
-    "or closeBy (nParticles starting on the +z HGCal front face, R 60-120 cm, z 320-321 cm)")
+    "or closeBy (nParticles starting on the +z HGCal front face, R 60-120 cm, z 320-321 cm, "
+    "consecutive particles delta cm apart)")
+options.register("delta", 10.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "closeBy gun only: arc-length separation in cm between consecutive particles on the HGCal "
+    "front face (Delta of CloseByParticleGunProducer; 10 cm is the producer's default). Every "
+    "particle after the first sits at the same R and z, shifted in phi by delta/R, so with "
+    "nParticles=2 the two showers start exactly delta cm apart. Not accepted with gun=flatEta.")
 options.register("truthReduced", 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "MC-truth graph scope: 0 = full detector (calo + MTD + muon + tracker, the default), "
     "1 = drop the tracker channel (customiseTruthReduced), enough for the calorimeter "
     "associators and cheaper at DIGI")
 options.parseArguments()
+
+if options.gun != "closeBy" and options.delta != 10.0:
+    raise ValueError(f"delta={options.delta} applies to the closeBy gun only (gun={options.gun}); "
+                     "the flatEta gun shoots from the origin and has no particle separation")
 
 # Import process based on useFineCalo and pileup flags.
 # - useFineCalo=1: use GSDfineCalo_fragment (no PU support here)
@@ -140,13 +150,17 @@ elif options.gun == "closeBy":
     # (metrics-data/{Gamma,Pion,Kaon}_Step3): the vertex is flat in R and z on
     # the +z HGCal front face and the momentum points away from the origin, so
     # the particle never crosses the tracker. These are the producer's own
-    # defaults except NParticles (2 by default).
+    # defaults except NParticles (2 by default) and Delta (set from delta=, in cm).
+    # With Overlapping=False particle i>0 is placed at the same R and z as the
+    # first one, shifted in phi by Delta/R: the showers start Delta cm apart in
+    # arc length, and Pointing=True makes them diverge like photons from the IP.
     process.generator = cms.EDProducer("CloseByParticleGunProducer",
         PGunParameters = cms.PSet(
             PartID=cms.vint32(int(options.particle)),
             NParticles=cms.int32(options.nParticles),
             RandomShoot=cms.bool(False),
             Overlapping=cms.bool(False),
+            Delta=cms.double(float(options.delta)),
             # energy flat in [minE, maxE] (VarMin/VarMax are energies unless
             # FlatPtGeneration)
             VarMin=cms.double(float(options.minE)),

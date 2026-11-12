@@ -18,6 +18,7 @@
 # Usage:
 #   bash submit_dag.sh --nreplicas N --nevents N (--energy E | --minE E --maxE E) \
 #        [--particle 22] [--partname photon] [--fine-calo] [--pileup N] [--nminbias N] \
+#        [--gun flatEta|closeBy] [--nparticles N] [--delta CM] [--ticl] \
 #        [--outdir PATH] [--workdir DIR] [--cmssw-base DIR] [--mode chain|stages] \
 #        [--keep nano,reco,gsd] [--canary N] [--flavour workday] [--ncpus N] \
 #        [--memory MB] [--nthreads N] [--seed-base N] [--retry N] \
@@ -66,6 +67,7 @@ while [ $# -gt 0 ]; do
         --mode)            MODE="$2";   PASS+=("$1" "$2"); shift 2 ;;
         --keep)            KEEP="$2";   PASS+=("$1" "$2"); shift 2 ;;
         --fine-calo)       PASS+=("$1"); shift ;;
+        --ticl)            PASS+=("$1"); shift ;;
         -h|--help)
             grep '^#' "$0" | head -40
             exit 0
