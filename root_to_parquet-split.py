@@ -55,9 +55,13 @@ def parse_args():
 # are derived in process_chunk() from the corresponding bunchCrossing/eventId
 # (eventIndex) branches (signal iff BX==0 AND eventId==0), TruthCB_hasHGCALHits /
 # TruthFG_hasHGCALHits from <grp>_simEnergyHGCAL. They are not read from disk.
-# Every group is optional: a nanoTruth_cfg.py file has no RecHit, SimCluster,
-# MergedSimCluster or TICLCand tables, a nanoML_cfg.py file (as of Oct 2026) no
-# TruthCB tables, and TruthFG needs a RECO made with truthFullGraph=1.
+# Every group is optional: a nanoTruth_cfg.py file has no RecHit, SimCluster or
+# MergedSimCluster tables, a nanoML_cfg.py file (as of Oct 2026) no TruthCB
+# tables, and TruthFG needs a RECO made with truthFullGraph=1. The TICL trackster
+# collections come in two versions (TICLv5: ticlTrackstersCLUE3DHigh first
+# iteration; TICLv6: ticlTrackstersCLUEstering first iteration and
+# ticlTracksterInterpretations final tracksters, nanoTruth_cfg.py); which one a
+# file carries is checked (detect_ticl_version), a file with neither is refused.
 BRANCH_GROUPS = {
     "RecHitHGC": [
         'RecHitHGC_x', 'RecHitHGC_y', 'RecHitHGC_z',
@@ -182,6 +186,27 @@ BRANCH_GROUPS = {
     ],
 }
 
+# TICLv6 (RECO.py useTICL=1, nanoTruth_cfg.py): the first iteration is
+# ticlTrackstersCLUEstering (in place of ticlTrackstersCLUE3DHigh) and the final
+# tracksters are ticlTracksterInterpretations; both have the CLUE3DHigh columns.
+TICLV6_TRACKSTER_GROUPS = ("ticlTrackstersCLUEstering", "ticlTracksterInterpretations")
+for _grp in TICLV6_TRACKSTER_GROUPS:
+    BRANCH_GROUPS[_grp] = [b.replace("ticlTrackstersCLUE3DHigh", _grp)
+                           for b in BRANCH_GROUPS["ticlTrackstersCLUE3DHigh"]]
+# Every reco trackster collection the split handles, v5 and v6 (each optional).
+RECO_TRACKSTER_GROUPS = ("ticlTrackstersCLUE3DHigh", "ticlTrackstersCLUEstering",
+                         "ticlTracksterLinks", "ticlTrackstersRecovery",
+                         "ticlTracksterInterpretations")
+
+# GEN particles of the gun (nanoTruth_cfg.py HGCalGenPart): kinematics and the
+# production vertex, e.g. the two closeBy photons and their separation on the
+# HGCal face. Assigned to an endcap by eta; no index points into or out of it.
+BRANCH_GROUPS["HGCalGenPart"] = [
+    'HGCalGenPart_pdgId', 'HGCalGenPart_status', 'HGCalGenPart_energy', 'HGCalGenPart_mass',
+    'HGCalGenPart_pt', 'HGCalGenPart_eta', 'HGCalGenPart_phi',
+    'HGCalGenPart_vx', 'HGCalGenPart_vy', 'HGCalGenPart_vz',
+]
+
 # ---------------------------------------------------------------------------
 # MC-truth tracksters and reco<->sim associations (see nanoML_cfg.py)
 # ---------------------------------------------------------------------------
@@ -246,7 +271,10 @@ BRANCH_GROUPS["SimCandidate2Tracksters"] = [
 # ticlSimTracksters) and SimTSToCLUE3DHighByHits (the reverse). Each has
 # per-row count/offset branches and a flat "...Links" table with the linked
 # index, sharedEnergy and score (lower is better).
-SIM_ASSOC_RECO = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links"}
+SIM_ASSOC_RECO = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "ticlTracksterLinks": "Links",
+                  # TICLv6 (nanoTruth_cfg.py short names)
+                  "ticlTrackstersCLUEstering": "CLUEstering",
+                  "ticlTracksterInterpretations": "Interpretations"}
 SIM_ASSOC_SIM = {"ticlSimTracksters": "SimTS", "ticlSimTrackstersFromCPs": "SimTSCP"}
 SIM_ASSOC_TYPES = ("ByHits", "ByLCs")
 
@@ -324,7 +352,10 @@ for _grp in TRUTH_PARTICLE_GROUPS:
 # truth->reco links the sim-normalised sharedEnergyFraction; both carry graphId and
 # score (lower is better). Absent tables are skipped like every optional group.
 TRUTH_ASSOC_RECO = {"ticlTrackstersCLUE3DHigh": "CLUE3DHigh", "LayerCluster": "LayerCluster",
-                    "ticlTracksterLinks": "Links"}
+                    "ticlTracksterLinks": "Links",
+                    # TICLv6 (nanoTruth_cfg.py: first and final iterations only)
+                    "ticlTrackstersCLUEstering": "CLUEstering",
+                    "ticlTracksterInterpretations": "Interpretations"}
 TRUTH_ASSOC_ADAPTIVE_POINTS = ("AdaptiveTight", "AdaptiveNominal")
 TRUTH_ASSOC_VALUES = ("graphId", "sharedEnergy", "sharedEnergyFraction", "score")
 # table name -> (source group, target group)
@@ -383,9 +414,24 @@ def _derive_sim_trackster_flags(per_file):
 # ---------------------------------------------------------------------------
 
 # Which trackster collection Candidate2TrackstersIndices_tracksterIndex points
-# into. In >=15.x TICLCandidates are built from the linked tracksters; verify
-# this matches your production before trusting the remapped candidate links.
-CAND_TRACKSTER_COLLECTION = "ticlTracksterLinks"
+# into, per TICL version of the input file: in v5 (>=15.x) the TICLCandidates
+# are built from the linked tracksters, in v6 (nanoTruth_cfg.py) from the final
+# ticlTracksterInterpretations. The version is read off every file
+# (detect_ticl_version), never assumed.
+CAND_TRACKSTER_COLLECTION = {"v5": "ticlTracksterLinks", "v6": "ticlTracksterInterpretations"}
+TICL_VERSION_MARKER = {"v5": "ticlTrackstersCLUE3DHigh", "v6": "ticlTrackstersCLUEstering"}
+
+
+def detect_ticl_version(branch_names):
+    """'v5' or 'v6' from the branch names of a nano tree. A file carrying both
+    first-iteration collections, or neither, is refused: no silent fallback."""
+    found = [v for v, grp in TICL_VERSION_MARKER.items() if f"{grp}_raw_energy" in branch_names]
+    if len(found) != 1:
+        have = [TICL_VERSION_MARKER[v] for v in found] or "neither"
+        raise RuntimeError(
+            f"cannot tell the TICL version of the input: first-iteration tracksters found: {have}; "
+            f"expected exactly one of {list(TICL_VERSION_MARKER.values())}")
+    return found[0]
 
 # Field used to decide endcap membership for each collection.
 # Positive endcap keeps value >= 0 (so nothing exactly at 0 is lost);
@@ -401,6 +447,10 @@ ENDCAP_KEY = {
     "ticlTrackstersCLUE3DHigh": "ticlTrackstersCLUE3DHigh_barycenter_z",
     "ticlTracksterLinks": "ticlTracksterLinks_barycenter_z",
     "ticlTrackstersRecovery": "ticlTrackstersRecovery_barycenter_z",
+    "ticlTrackstersCLUEstering": "ticlTrackstersCLUEstering_barycenter_z",
+    "ticlTracksterInterpretations": "ticlTracksterInterpretations_barycenter_z",
+    # GEN particles: by eta (the gun shoots at |eta| > 1.5, nothing sits at 0)
+    "HGCalGenPart": "HGCalGenPart_eta",
     # SimTracksters: side of the seed at the calo boundary (defined even when
     # all of the SimTrackster's layer clusters were filtered away); falls back
     # to the barycenter (ENDCAP_KEY_FALLBACK) when the seed never reached the
@@ -603,6 +653,17 @@ def _split_layerclusters(d, keep, maps, flip):
     return out
 
 
+def _split_genparts(d, k, flip, prefix="HGCalGenPart"):
+    """GEN particles: row-aligned, nothing indexes them. The z-reflection flips
+    eta and the production-vertex z; vx, vy, phi, pt and energy are untouched."""
+    out = {f: d[f][k] for f in d.fields}
+    if flip:
+        for f in (f"{prefix}_eta", f"{prefix}_vz"):
+            if f in out:
+                out[f] = -out[f]
+    return out
+
+
 def _split_ticlcands(d, k, flip, prefix="TICLCand"):
     out = {f: d[f][k] for f in d.fields}
     if flip:
@@ -787,13 +848,15 @@ def _present(batch, grp, field):
     return grp in batch and field in batch[grp].fields
 
 
-def build_endcap(batch, side):
+def build_endcap(batch, side, cand_target):
     """Build one endcap's worth of events from the full batch.
 
     side=+1 keeps z (or eta) >= 0; side=-1 keeps z (or eta) < 0 and mirrors
     the geometry (z -> -z, eta -> -eta) so it looks like the +z endcap.
     All cross-collection indices are remapped to the filtered collections;
-    references into removed objects become -1.
+    references into removed objects become -1. cand_target is the trackster
+    collection the TICLCand links point into (CAND_TRACKSTER_COLLECTION of the
+    file's TICL version).
     """
     flip = side < 0
 
@@ -810,8 +873,7 @@ def build_endcap(batch, side):
     maps = {grp: _index_map(keep[grp])
             for grp in ("SimCluster", "MergedSimCluster",
                         "MergedCaloTruthMergedSimCluster", "LayerCluster",
-                        CAND_TRACKSTER_COLLECTION,
-                        "ticlTrackstersCLUE3DHigh", "ticlTracksterLinks",
+                        *RECO_TRACKSTER_GROUPS,
                         "ticlSimTracksters", "ticlSimTrackstersFromCPs",
                         *TRUTH_PARTICLE_GROUPS)
             if grp in keep}
@@ -829,16 +891,19 @@ def build_endcap(batch, side):
             out[grp] = _split_simclusters(batch[grp], grp, keep[grp], flip)
     if "LayerCluster" in keep:
         out["LayerCluster"] = _split_layerclusters(batch["LayerCluster"], keep, maps, flip)
+    if "HGCalGenPart" in keep:
+        out["HGCalGenPart"] = _split_genparts(batch["HGCalGenPart"], keep["HGCalGenPart"], flip)
     if "TICLCand" in keep:
         out["TICLCand"] = _split_ticlcands(batch["TICLCand"], keep["TICLCand"], flip)
-        if (CAND_TRACKSTER_COLLECTION in maps
-                and _present(batch, "Candidate2Tracksters",
-                             "Candidate2TrackstersIndices_tracksterIndex")):
+        if _present(batch, "Candidate2Tracksters",
+                    "Candidate2TrackstersIndices_tracksterIndex"):
+            if cand_target not in maps:
+                raise RuntimeError(
+                    f"Candidate2Tracksters links point into {cand_target}, which this file "
+                    "does not carry, so the candidate links cannot be remapped")
             out["Candidate2Tracksters"] = _split_candidates(
-                batch["Candidate2Tracksters"], keep["TICLCand"],
-                maps[CAND_TRACKSTER_COLLECTION])
-    for grp in ("ticlTrackstersCLUE3DHigh", "ticlTracksterLinks",
-                "ticlTrackstersRecovery"):
+                batch["Candidate2Tracksters"], keep["TICLCand"], maps[cand_target])
+    for grp in RECO_TRACKSTER_GROUPS:
         if grp in keep and "LayerCluster" in maps:
             out[grp] = _split_tracksters(batch[grp], grp, keep[grp],
                                          maps["LayerCluster"], flip)
@@ -1145,7 +1210,7 @@ def _iter_chunks(tree, step_size, max_events):
         yield start, min(start + step_size, n)
 
 
-def process_chunk(tree, start, stop):
+def process_chunk(tree, start, stop, cand_target):
     """Read events [start, stop) of one nanoML tree, split every event into
     its two endcaps, and return the combined data (2 output events per input
     event, interleaved: [+z of ev0, -z of ev0, +z of ev1, ...])."""
@@ -1176,8 +1241,8 @@ def process_chunk(tree, start, stop):
     batch = per_file
 
     # Split each event into two: +z endcap as-is, -z endcap mirrored to +z
-    pos = build_endcap(batch, +1)
-    neg = build_endcap(batch, -1)
+    pos = build_endcap(batch, +1, cand_target)
+    neg = build_endcap(batch, -1, cand_target)
 
     both = ak.concatenate([pos, neg])
     n = len(pos)
@@ -1212,20 +1277,30 @@ def main():
     print(f"Endcap split: 2 output events per input event "
           f"(-z endcap mirrored via z->-z, eta->-eta; TruthCB/TruthFG by the sign of boundaryZ, "
           f"of the GEN eta without a boundary crossing)")
-    print(f"Candidate links assumed to point into: {CAND_TRACKSTER_COLLECTION}")
+    print(f"Candidate links point into {CAND_TRACKSTER_COLLECTION} by TICL version, "
+          f"read off every file ({TICL_VERSION_MARKER})")
     print(f"Writing incrementally to {output.describe()}")
 
     parquet_writer = None
     schema = None
     n_written = 0
+    ticl_version = None
 
     try:
         for i, f in enumerate(MLfileList):
             with uproot.open(f)["Events"] as tree:
+                version = detect_ticl_version(set(tree.keys()))
+                if ticl_version is None:
+                    ticl_version = version
+                elif version != ticl_version:
+                    raise RuntimeError(f"{f} is a TICL {version} file but the first input was "
+                                       f"TICL {ticl_version}; one parquet file holds one version")
+                cand_target = CAND_TRACKSTER_COLLECTION[version]
                 chunks = list(_iter_chunks(tree, step_size, args.max_events))
-                print(f"\nFile {i+1}/{n_files}: {f} ({tree.num_entries} events, {len(chunks)} chunks)")
+                print(f"\nFile {i+1}/{n_files}: {f} ({tree.num_entries} events, {len(chunks)} chunks, "
+                      f"TICL {version}, candidate links into {cand_target})")
                 for start, stop in tqdm(chunks, desc="  chunks", leave=False):
-                    chunk = process_chunk(tree, start, stop)
+                    chunk = process_chunk(tree, start, stop, cand_target)
 
                     # Convert to arrow table (schema fixed by the first chunk)
                     table, schema = _chunk_to_table(chunk, schema)

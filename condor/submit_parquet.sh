@@ -29,7 +29,12 @@
 #                 per-dataset folders (--merge). Output names: <input basename
 #                 without _nanoML.root>_split.parquet, or with --merge the files'
 #                 common prefix before _rep<N> (photons_stdCalo_E10_split.parquet)
-#   --workdir     DAG, submit files and logs (AFS, not EOS)
+#   --workdir     DAG, submit files and logs (AFS, not EOS). The CERN schedds
+#                 refuse a submit file whose executable, log or input lives on
+#                 /eos (SUBMIT_REQUIREMENT_NoEos), so run_parquet.sh is copied
+#                 next to the DAG and the submit files point at that copy; the
+#                 scripts' own directory (prodtests=) may be on EOS, it only
+#                 appears in the job arguments.
 #   --force       overwrite existing outputs (default: jobs whose output already
 #                 exists exit immediately, so resubmitting only fills the gaps)
 #   --tag         name used for the DAG/submit files (default: basename of --outdir)
@@ -37,6 +42,9 @@
 #                 /tmp/x509up_u<uid>). It is copied into <workdir>/proxy/, whose
 #                 AFS ACL is restricted to you, because DAGMan submits the node
 #                 jobs from the schedd, where /tmp of this machine is not visible.
+#                 Not needed for a CERN EOS destination (root://eoscms.cern.ch,
+#                 root://eosuser.cern.ch, ...): the jobs use the kerberos ticket
+#                 that CERN HTCondor forwards, like the production DAGs.
 #
 # Must be run from a shell where cmsenv has NOT been sourced (it leaks
 # PYTHONHOME/PYTHONPATH/LD_LIBRARY_PATH, which breaks condor_submit_dag).
@@ -46,7 +54,7 @@ shopt -s extglob
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRODTESTS="$(cd "$HERE/.." && pwd)"
 
-INDIRS=(); OUTDIR=""; WORKDIR=""; MERGE=0; PATTERN="*_nanoML.root"; STEP=500
+INDIRS=(); OUTDIR=""; WORKDIR=""; MERGE=0; PATTERN="*_nanoML.root"; STEP=500; KRB=0
 NCPUS=2; MEMORY=""; DISK=2000000; FLAVOUR="longlunch"; RETRY=2; FORCE=0
 METADATA=1; PROXY="${X509_USER_PROXY:-/tmp/x509up_u$(id -u)}"
 LCG=/cvmfs/sft.cern.ch/lcg/views/LCG_109/x86_64-el9-gcc13-opt/setup.sh
@@ -92,13 +100,23 @@ REMOTE=0
 case "$OUTDIR" in
     root://*)
         REMOTE=1
-        [ -f "$PROXY" ] || die "VOMS proxy not found at $PROXY (voms-proxy-init -voms cms --valid 192:00)"
-        if command -v voms-proxy-info >/dev/null; then
-            LEFT=$(voms-proxy-info -file "$PROXY" -timeleft 2>/dev/null || echo 0)
-            [ "$LEFT" -gt 7200 ] || die "proxy $PROXY has only ${LEFT}s left; renew it (voms-proxy-init -voms cms --valid 192:00)"
-            echo "Proxy  : $PROXY ($((LEFT / 3600)) h left)"
-        fi
-        export X509_USER_PROXY="$PROXY"
+        case "$OUTDIR" in
+            root://eoscms.cern.ch*|root://eosuser.cern.ch*|root://eoshome*.cern.ch*|root://eosproject*.cern.ch*)
+                # CERN EOS accepts the kerberos ticket HTCondor forwards: no proxy shipped
+                KRB=1
+                klist -s 2>/dev/null || die "no valid kerberos ticket (kinit); HTCondor forwards it to the jobs"
+                echo "Auth   : kerberos ($(klist 2>/dev/null | awk '/krbtgt/ {print "expires", $3, $4; exit}')), CERN EOS destination"
+                ;;
+            *)
+                [ -f "$PROXY" ] || die "VOMS proxy not found at $PROXY (voms-proxy-init -voms cms --valid 192:00)"
+                if command -v voms-proxy-info >/dev/null; then
+                    LEFT=$(voms-proxy-info -file "$PROXY" -timeleft 2>/dev/null || echo 0)
+                    [ "$LEFT" -gt 7200 ] || die "proxy $PROXY has only ${LEFT}s left; renew it (voms-proxy-init -voms cms --valid 192:00)"
+                    echo "Proxy  : $PROXY ($((LEFT / 3600)) h left)"
+                fi
+                export X509_USER_PROXY="$PROXY"
+                ;;
+        esac
         XRD_HOST="${OUTDIR#root://}"; XRD_HOST="root://${XRD_HOST%%/*}"
         XRD_DIR="/${OUTDIR#root://*/}"; XRD_DIR="/${XRD_DIR##+(/)}"
         xrdfs "$XRD_HOST" mkdir -p "$XRD_DIR" >/dev/null 2>&1 || true
@@ -169,11 +187,15 @@ done
 # ---- work directory ----------------------------------------------------------
 mkdir -p "$WORKDIR/logs"
 WORKDIR="$(cd "$WORKDIR" && pwd)"
+case "$WORKDIR" in /eos/*) die "--workdir must not be on EOS (the schedds refuse /eos executables and logs); use AFS" ;; esac
 cp "$HERE/dag.config" "$WORKDIR/dag.config"
+# The node script must not be read from /eos by the schedd (see --workdir above).
+RUNPARQUET="$WORKDIR/run_parquet.sh"
+[ "$HERE/run_parquet.sh" -ef "$RUNPARQUET" ] || cp -f "$HERE/run_parquet.sh" "$RUNPARQUET"
 JDL="parquet_${TAG}.jdl"; META_JDL="parquet_meta_${TAG}.jdl"; DAG="parquet_${TAG}.dag"
 
 PROXY_ARG=""
-if [ "$REMOTE" -eq 1 ]; then
+if [ "$REMOTE" -eq 1 ] && [ "$KRB" -eq 0 ]; then
     # DAGMan runs condor_submit on the schedd, so the proxy must live on a
     # filesystem visible there (AFS), readable only by the owner.
     mkdir -p "$WORKDIR/proxy"
@@ -190,7 +212,7 @@ COMMON_ARGS="prodtests=$PRODTESTS lcg=$LCG"
 {
     echo "# Auto-generated by submit_parquet.sh for $TAG"
     echo "universe                = vanilla"
-    echo "executable              = $HERE/run_parquet.sh"
+    echo "executable              = $RUNPARQUET"
     echo "arguments               = stage=convert infiles=\$(infiles) outdir=\$(outdir) outfile=\$(outfile) step=$STEP force=$FORCE $COMMON_ARGS"
     echo "should_transfer_files   = YES"
     echo "when_to_transfer_output = ON_EXIT"
@@ -210,7 +232,7 @@ COMMON_ARGS="prodtests=$PRODTESTS lcg=$LCG"
 {
     echo "# Auto-generated by submit_parquet.sh for $TAG: _metadata/_common_metadata writer"
     echo "universe                = vanilla"
-    echo "executable              = $HERE/run_parquet.sh"
+    echo "executable              = $RUNPARQUET"
     echo "arguments               = stage=metadata outdir=\$(outdir) $COMMON_ARGS"
     echo "should_transfer_files   = YES"
     echo "when_to_transfer_output = ON_EXIT"

@@ -8,10 +8,11 @@
 #   generate_photons_FineCalo.sh    generate_photons_noFineCalo.sh
 #   generate_taus_FineCalo.sh       generate_taus_noFineCalo.sh
 #   generate_pions_noFineCalo.sh    generate_K0L_noFineCalo.sh
-#   generate_taus_noFineCalo_30PU.sh
+#   generate_taus_noFineCalo_30PU.sh  generate_pions_noFineCalo_flatRandom.sh
 #
 # set PARTICLE / PARTNAME / USE_FINE_CALO (and optionally PILEUP, the default
-# average pileup; 0 when unset), source this file and call
+# average pileup, 0 when unset, and GUN, the default gun, flatEta when unset),
+# source this file and call
 #
 #   run_chain "$@"
 #
@@ -63,7 +64,16 @@ Options:
                                     (R 60-120 cm, z 320-321 cm), as in the earlier GNN
                                     energy-resolution samples; -z stays empty, so keep
                                     the default (non-split) parquet
-  --nthreads N           threads per cmsRun step (default: 1)
+                           flatRandom  FlatRandomMultiParticlePGunProducer (as Reco2Pico's
+                                    SingleHadronPGun_cfi): one particle per event from the
+                                    origin, flat in |p| (--pMin/--pMax) and eta
+                                    (--etaMin/--etaMax), single endcap (+z by default);
+                                    --minE/--maxE are rejected
+  --pMin X / --pMax X    flatRandom only: momentum range in GeV (default: 0.2 / 200.0)
+  --etaMin X / --etaMax X
+                         flatRandom only: signed eta interval (default: 1.6 / 2.9;
+                         --etaMin -2.9 --etaMax -1.6 for the -z endcap)
+  --nthreads N          threads per cmsRun step (default: 1)
 ${pu_note}
   --run-pftruth          enable the PFTruth sequence in nanoML (broken with pileup)
   --split                use root_to_parquet-split.py (one row per HGCAL endcap)
@@ -208,7 +218,12 @@ run_chain() {
 
     # ---- defaults -------------------------------------------------------
     local OUTPUT_DIR="" NEVENTS=1000
-    local SEED=1 MIN_ENERGY=20.0 MAX_ENERGY=200.0 GUN=flatEta NTHREADS=1
+    local SEED=1 MIN_ENERGY=20.0 MAX_ENERGY=200.0 NTHREADS=1
+    # GUN may be preset by the wrapper (generate_pions_noFineCalo_flatRandom.sh sets flatRandom).
+    local GUN="${GUN:-flatEta}"
+    # flatRandom kinematics (GSD_GUN.py defaults, as in SingleHadronPGun_cfi.py)
+    local P_MIN=0.2 P_MAX=200.0 ETA_MIN=1.6 ETA_MAX=2.9
+    local energy_given=0 flatrandom_given=0
     # PILEUP may be preset by the wrapper (generate_taus_noFineCalo_30PU.sh sets 30).
     local PILEUP="${PILEUP:-0}" PU_FILE="" NMINBIAS=""
     local RUN_PFTRUTH=0 DO_PARQUET=1 SPLIT=0
@@ -229,8 +244,12 @@ run_chain() {
             --fine-calo)   USE_FINE_CALO=1;  shift ;;
 	        --ticl)        USE_TICL=1;       shift ;;
             --seed)        SEED="$2";        shift 2 ;;
-            --minE|--mine) MIN_ENERGY="$2";  shift 2 ;;
-            --maxE|--maxe) MAX_ENERGY="$2";  shift 2 ;;
+            --minE|--mine) MIN_ENERGY="$2";  energy_given=1; shift 2 ;;
+            --maxE|--maxe) MAX_ENERGY="$2";  energy_given=1; shift 2 ;;
+            --pMin|--pmin) P_MIN="$2";       flatrandom_given=1; shift 2 ;;
+            --pMax|--pmax) P_MAX="$2";       flatrandom_given=1; shift 2 ;;
+            --etaMin|--etamin) ETA_MIN="$2"; flatrandom_given=1; shift 2 ;;
+            --etaMax|--etamax) ETA_MAX="$2"; flatrandom_given=1; shift 2 ;;
             --gun)         GUN="$2";         shift 2 ;;
             --nthreads)    NTHREADS="$2";    shift 2 ;;
             --pileup)      PILEUP="$2";      shift 2 ;;
@@ -269,9 +288,17 @@ run_chain() {
     [ -n "$PARTNAME" ] || PARTNAME=$(chain_default_partname "$PARTICLE")
 
     case "$GUN" in
-        flatEta|closeBy) ;;
-        *) chain_die "--gun must be flatEta or closeBy (got '$GUN')" ;;
+        flatEta|closeBy|flatRandom) ;;
+        *) chain_die "--gun must be flatEta, closeBy or flatRandom (got '$GUN')" ;;
     esac
+    # flatRandom is configured in momentum/eta, the other guns in energy (GSD_GUN.py
+    # rejects the wrong family too; fail here before any step runs).
+    if [ "$GUN" = flatRandom ] && [ "$energy_given" -eq 1 ]; then
+        chain_die "--minE/--maxE do not apply to --gun flatRandom (flat in momentum): use --pMin/--pMax"
+    fi
+    if [ "$GUN" != flatRandom ] && [ "$flatrandom_given" -eq 1 ]; then
+        chain_die "--pMin/--pMax/--etaMin/--etaMax only apply to --gun flatRandom (got --gun $GUN)"
+    fi
 
     if [ "$DRY_RUN" -eq 0 ] && ! command -v cmsRun >/dev/null 2>&1; then
         chain_die "cmsRun not found in PATH. Did you run 'cmsenv' in this CMSSW area first?"
@@ -305,6 +332,8 @@ run_chain() {
     [ "$USE_FINE_CALO" -eq 1 ] && CALO_TAG="fineCalo"
     local TAG="${PARTNAME}_${CALO_TAG}"
     [ "$PILEUP" -gt 0 ] && TAG="${TAG}_PU${PILEUP}"
+    # different kinematics from the default flatEta gun: keep the files apart
+    [ "$GUN" = flatRandom ] && TAG="${TAG}_flatRandom"
 
     local MINBIAS_FILE="$OUTPUT_DIR/${TAG}_MINBIAS.root"
     local GSD_FILE="$OUTPUT_DIR/${TAG}_GSD.root"
@@ -322,7 +351,12 @@ run_chain() {
     echo "=============================================================="
     echo "  events        : $NEVENTS"
     echo "  seed          : $SEED"
-    echo "  energy range  : ${MIN_ENERGY} - ${MAX_ENERGY} GeV"
+    if [ "$GUN" = flatRandom ]; then
+        echo "  momentum range: ${P_MIN} - ${P_MAX} GeV (flat in |p|)"
+        echo "  eta range     : ${ETA_MIN} - ${ETA_MAX}"
+    else
+        echo "  energy range  : ${MIN_ENERGY} - ${MAX_ENERGY} GeV"
+    fi
     echo "  gun           : $GUN"
     echo "  threads       : $NTHREADS"
     if [ "$PILEUP" -gt 0 ]; then
@@ -385,11 +419,14 @@ run_chain() {
         useFineCalo="$USE_FINE_CALO"
         pileup="$PILEUP"
         particle="$PARTICLE"
-        minE="$MIN_ENERGY"
-        maxE="$MAX_ENERGY"
         gun="$GUN"
         outputFile="$GSD_FILE"
     )
+    if [ "$GUN" = flatRandom ]; then
+        gsd_args+=(pMin="$P_MIN" pMax="$P_MAX" etaMin="$ETA_MIN" etaMax="$ETA_MAX")
+    else
+        gsd_args+=(minE="$MIN_ENERGY" maxE="$MAX_ENERGY")
+    fi
     [ "$PILEUP" -gt 0 ] && gsd_args+=(pu="$PU_FILE")
 
     if ! chain_skip "GSD step" "$GSD_FILE"; then

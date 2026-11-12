@@ -34,7 +34,19 @@ options.register("pu", "", VarParsing.multiplicity.singleton, VarParsing.varType
 options.register("gun", "flatEta", VarParsing.multiplicity.singleton, VarParsing.varType.string,
     "particle gun: flatEta (from the origin, nParticles into each endcap, |eta| 1.5-3.0) "
     "or closeBy (nParticles starting on the +z HGCal front face, R 60-120 cm, z 320-321 cm, "
-    "consecutive particles delta cm apart)")
+    "consecutive particles delta cm apart) "
+    "or flatRandom (FlatRandomMultiParticlePGunProducer, as Reco2Pico's SingleHadronPGun_cfi: "
+    "ONE particle per event from the origin, flat in |p| in [pMin, pMax] and eta in "
+    "[etaMin, etaMax], a single eta interval, i.e. one endcap)")
+options.register("pMin", 0.2, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "flatRandom gun only: minimum momentum |p| in GeV (E = sqrt(p^2 + m^2))")
+options.register("pMax", 200.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "flatRandom gun only: maximum momentum |p| in GeV")
+options.register("etaMin", 1.6, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "flatRandom gun only: lower edge of the eta interval (signed; use etaMin=-2.9 etaMax=-1.6 "
+    "for the -z endcap)")
+options.register("etaMax", 2.9, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "flatRandom gun only: upper edge of the eta interval (signed)")
 options.register("delta", 10.0, VarParsing.multiplicity.singleton, VarParsing.varType.float,
     "closeBy gun only: arc-length separation in cm between consecutive particles on the HGCal "
     "front face (Delta of CloseByParticleGunProducer; 10 cm is the producer's default). Every "
@@ -49,6 +61,25 @@ options.parseArguments()
 if options.gun != "closeBy" and options.delta != 10.0:
     raise ValueError(f"delta={options.delta} applies to the closeBy gun only (gun={options.gun}); "
                      "the flatEta gun shoots from the origin and has no particle separation")
+
+# The flatRandom gun is configured in momentum and eta, the other guns in energy: refuse
+# the options of the other family instead of silently ignoring them.
+_flatRandomDefaults = {"pMin": 0.2, "pMax": 200.0, "etaMin": 1.6, "etaMax": 2.9}
+if options.gun == "flatRandom":
+    if options.minE != 20.0 or options.maxE != 200.0:
+        raise ValueError(f"minE/maxE (got {options.minE}/{options.maxE}) do not apply to gun=flatRandom, "
+                         "which is flat in momentum: use pMin=/pMax=")
+    if options.nParticles != 1:
+        raise ValueError(f"nParticles={options.nParticles}: gun=flatRandom "
+                         "(FlatRandomMultiParticlePGunProducer) shoots exactly one particle per event")
+    if not (0 <= options.pMin < options.pMax):
+        raise ValueError(f"gun=flatRandom needs 0 <= pMin < pMax (got pMin={options.pMin}, pMax={options.pMax})")
+    if not (options.etaMin < options.etaMax):
+        raise ValueError(f"gun=flatRandom needs etaMin < etaMax (got {options.etaMin}, {options.etaMax})")
+else:
+    _changed = [k for k, v in _flatRandomDefaults.items() if getattr(options, k) != v]
+    if _changed:
+        raise ValueError(f"{', '.join(_changed)} only apply to gun=flatRandom (gun={options.gun})")
 
 # Import process based on useFineCalo and pileup flags.
 # - useFineCalo=1: use GSDfineCalo_fragment (no PU support here)
@@ -181,8 +212,31 @@ elif options.gun == "closeBy":
         AddAntiParticle=cms.bool(False),
         firstRun=cms.untracked.uint32(1)
     )
+elif options.gun == "flatRandom":
+    # Same generator as Reco2Pico/PicoProducer/python/samples_workflows/phase2_gun/
+    # SingleHadronPGun_cfi.py (stock IOMC/ParticleGuns plugin): one particle per event
+    # from the origin, |p| flat in [pMin, pMax] (E = sqrt(p^2 + m^2), so a proton at
+    # pMin=0.2 GeV has E = 0.96 GeV), eta flat in ONE interval [etaMin, etaMax] (so a
+    # single endcap per job, +z by default), phi flat in [-pi, pi].
+    process.generator = cms.EDProducer("FlatRandomMultiParticlePGunProducer",
+        PGunParameters = cms.PSet(
+            PartID=cms.vint32(int(options.particle)),
+            ProbParts=cms.vdouble(1.0),
+            MinP=cms.double(float(options.pMin)),
+            MaxP=cms.double(float(options.pMax)),
+            MinEta=cms.double(float(options.etaMin)),
+            MaxEta=cms.double(float(options.etaMax)),
+            MinPhi=cms.double(-math.pi),
+            MaxPhi=cms.double(math.pi),
+        ),
+        Verbosity=cms.untracked.int32(0),
+        psethack=cms.string(f"single particle {int(options.particle)}, flat p "
+                            f"{options.pMin}-{options.pMax} GeV, eta {options.etaMin}-{options.etaMax}"),
+        AddAntiParticle=cms.bool(False),
+        firstRun=cms.untracked.uint32(1)
+    )
 else:
-    raise ValueError(f"unknown gun '{options.gun}' (expected flatEta or closeBy)")
+    raise ValueError(f"unknown gun '{options.gun}' (expected flatEta, closeBy or flatRandom)")
 
 process.options.numberOfThreads = cms.untracked.uint32(options.nThreads)
 

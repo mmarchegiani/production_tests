@@ -9,9 +9,10 @@
 #                    fetched into the job sandbox with xrdcp (kerberos is
 #                    forwarded by CERN HTCondor); any other path is read in place
 #   infile=PATH      convert: a single input (same as infiles= with one entry)
-#   outdir=URL       folder for the parquet files: root://host//path (streamed,
-#                    needs the VOMS proxy that HTCondor puts in X509_USER_PROXY)
-#                    or a local directory
+#   outdir=URL       folder for the parquet files: root://host//path (streamed;
+#                    needs the VOMS proxy that HTCondor puts in X509_USER_PROXY,
+#                    except for CERN EOS hosts, which take the forwarded kerberos
+#                    ticket) or a local directory
 #   outfile=NAME     convert: parquet file name
 #   step=N           convert: --step_size (default 500 = one row group per 500 events)
 #   maxevents=N      convert: --max_events per input file (tests only)
@@ -67,13 +68,23 @@ echo "    python3: $(command -v python3) ($(python3 --version 2>&1))"
 
 case "$OUTDIR" in
     root://*)
-        # VOMS proxy for the remote storage: HTCondor sets X509_USER_PROXY
-        # from the x509userproxy submit attribute; fall back to the usual
-        # location for interactive runs.
-        : "${X509_USER_PROXY:=/tmp/x509up_u$(id -u)}"
-        export X509_USER_PROXY
-        [ -f "$X509_USER_PROXY" ] || { echo "ERROR: no VOMS proxy at $X509_USER_PROXY" >&2; exit 1; }
-        echo "    proxy: $X509_USER_PROXY"
+        case "$OUTDIR" in
+            root://eoscms.cern.ch*|root://eosuser.cern.ch*|root://eoshome*.cern.ch*|root://eosproject*.cern.ch*)
+                # CERN EOS: the kerberos ticket forwarded by HTCondor (or the
+                # interactive one) authenticates the XRootD client, no proxy.
+                klist -s 2>/dev/null || { echo "ERROR: no valid kerberos ticket for $OUTDIR" >&2; exit 1; }
+                echo "    auth: kerberos ($(klist 2>/dev/null | awk '/Default principal/ {print $3}'))"
+                ;;
+            *)
+                # VOMS proxy for the remote storage: HTCondor sets X509_USER_PROXY
+                # from the x509userproxy submit attribute; fall back to the usual
+                # location for interactive runs.
+                : "${X509_USER_PROXY:=/tmp/x509up_u$(id -u)}"
+                export X509_USER_PROXY
+                [ -f "$X509_USER_PROXY" ] || { echo "ERROR: no VOMS proxy at $X509_USER_PROXY" >&2; exit 1; }
+                echo "    proxy: $X509_USER_PROXY"
+                ;;
+        esac
         REMOTE=1
         XRD_HOST="${OUTDIR#root://}"; XRD_HOST="root://${XRD_HOST%%/*}"
         XRD_DIR="/${OUTDIR#root://*/}"; XRD_DIR="/${XRD_DIR##+(/)}"   # root://h//p -> /p
