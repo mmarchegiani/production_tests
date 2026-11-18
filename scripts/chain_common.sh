@@ -73,7 +73,11 @@ Options:
   --etaMin X / --etaMax X
                          flatRandom only: signed eta interval (default: 1.6 / 2.9;
                          --etaMin -2.9 --etaMax -1.6 for the -z endcap)
-  --nthreads N          threads per cmsRun step (default: 1)
+  --cpMinE X             CaloParticle creation threshold in GeV, GSD step
+                         (default: ${CP_MIN_E:-0.5}; release value 0.5)
+  --genPtMin X           pT cut in GeV of the HGCalGenPart nano table, 0 = none
+                         (default: ${GEN_PT_MIN:-0.5}; release value 0.5; nanoTruth_cfg.py only)
+  --nthreads N           threads per cmsRun step (default: 1)
 ${pu_note}
   --run-pftruth          enable the PFTruth sequence in nanoML (broken with pileup)
   --split                use root_to_parquet-split.py (one row per HGCAL endcap)
@@ -224,6 +228,9 @@ run_chain() {
     # flatRandom kinematics (GSD_GUN.py defaults, as in SingleHadronPGun_cfi.py)
     local P_MIN=0.2 P_MAX=200.0 ETA_MIN=1.6 ETA_MAX=2.9
     local energy_given=0 flatrandom_given=0
+    # Low-energy thresholds; may be preset by the wrapper (the flatRandom pion wrapper sets
+    # 0.1 / 0, as Reco2Pico's hadron gun). Defaults are the release values.
+    local CP_MIN_E="${CP_MIN_E:-0.5}" GEN_PT_MIN="${GEN_PT_MIN:-0.5}"
     # PILEUP may be preset by the wrapper (generate_taus_noFineCalo_30PU.sh sets 30).
     local PILEUP="${PILEUP:-0}" PU_FILE="" NMINBIAS=""
     local RUN_PFTRUTH=0 DO_PARQUET=1 SPLIT=0
@@ -251,6 +258,8 @@ run_chain() {
             --etaMin|--etamin) ETA_MIN="$2"; flatrandom_given=1; shift 2 ;;
             --etaMax|--etamax) ETA_MAX="$2"; flatrandom_given=1; shift 2 ;;
             --gun)         GUN="$2";         shift 2 ;;
+            --cpMinE|--cpmine)     CP_MIN_E="$2";   shift 2 ;;
+            --genPtMin|--genptmin) GEN_PT_MIN="$2"; shift 2 ;;
             --nthreads)    NTHREADS="$2";    shift 2 ;;
             --pileup)      PILEUP="$2";      shift 2 ;;
             --pu)          PU_FILE="$2";     shift 2 ;;
@@ -358,6 +367,7 @@ run_chain() {
         echo "  energy range  : ${MIN_ENERGY} - ${MAX_ENERGY} GeV"
     fi
     echo "  gun           : $GUN"
+    echo "  thresholds    : CaloParticle E > ${CP_MIN_E} GeV, HGCalGenPart pT > ${GEN_PT_MIN} GeV"
     echo "  threads       : $NTHREADS"
     if [ "$PILEUP" -gt 0 ]; then
         if [ -n "$PU_FILE" ]; then
@@ -420,6 +430,7 @@ run_chain() {
         pileup="$PILEUP"
         particle="$PARTICLE"
         gun="$GUN"
+        cpMinE="$CP_MIN_E"
         outputFile="$GSD_FILE"
     )
     if [ "$GUN" = flatRandom ]; then
@@ -448,6 +459,11 @@ run_chain() {
     fi
 
     # ---- step 4: nanoML ---------------------------------------------------
+    # genPtMin is a nanoTruth_cfg.py option: it is only passed when it differs from the
+    # release value, so another NANO_CFG keeps working with the default and stops on an
+    # unknown argument (instead of silently keeping the 0.5 GeV cut) otherwise.
+    local nano_extra=()
+    [ "$GEN_PT_MIN" != "0.5" ] && nano_extra+=(genPtMin="$GEN_PT_MIN")
     if ! chain_skip "nanoML step" "$NANO_FILE"; then
         CHAIN_STEP_OUTPUT="$NANO_FILE"
         chain_run_step "Running nanoML step" "$LOG_DIR/${TAG}_nanoml.log" \
@@ -456,7 +472,8 @@ run_chain() {
                 runPFTruth="$RUN_PFTRUTH" \
                 runMergedSimClusters="$RUN_MERGED_SC" \
                 inputFiles="file:$RECO_FILE" \
-                outputFile="$NANO_FILE"
+                outputFile="$NANO_FILE" \
+                "${nano_extra[@]}"
     fi
 
     # ---- step 5: parquet --------------------------------------------------

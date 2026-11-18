@@ -39,7 +39,13 @@ options.register("runPFTruth", 0, VarParsing.multiplicity.singleton, VarParsing.
     "ignored (nanoML_cfg.py compatibility)")
 options.register("runMergedSimClusters", 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "ignored (nanoML_cfg.py compatibility)")
+options.register("genPtMin", 0.5, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "pT cut in GeV of the HGCalGenPart table (0.5 is the release default; 0 keeps every "
+    "status-1 gen particle). At 1.6 < eta < 2.9, pT > 0.5 means |p| > 1.3-4.6 GeV: a "
+    "low-momentum gun needs genPtMin=0, as Reco2Pico's gun_options.apply_gun_thresholds.")
 options.parseArguments()
+if options.genPtMin < 0:
+    raise ValueError(f"genPtMin={options.genPtMin} must be >= 0")
 
 # The TICLv6 trackster collections and their short names in the association tables.
 _ticlFirstIteration = "ticlTrackstersCLUEstering"
@@ -131,7 +137,8 @@ process.nanoMetadata = nanoMetadata
 # GEN particles (upstream DPGAnalysis/HGCalNanoAOD table, name HGCalGenPart)
 # ---------------------------------------------------------------------------
 from DPGAnalysis.HGCalNanoAOD.hgcalGen_cfi import hgcalGenPartTable
-process.hgcalGenPartTable = hgcalGenPartTable
+process.hgcalGenPartTable = hgcalGenPartTable.clone(
+    cut="status==1" + (f" && pt > {options.genPtMin}" if options.genPtMin > 0 else ""))
 
 # ---------------------------------------------------------------------------
 # Layer clusters: the upstream producer with the pepr column names, so the

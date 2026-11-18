@@ -52,6 +52,10 @@ options.register("delta", 10.0, VarParsing.multiplicity.singleton, VarParsing.va
     "front face (Delta of CloseByParticleGunProducer; 10 cm is the producer's default). Every "
     "particle after the first sits at the same R and z, shifted in phi by delta/R, so with "
     "nParticles=2 the two showers start exactly delta cm apart. Not accepted with gun=flatEta.")
+options.register("cpMinE", 0.5, VarParsing.multiplicity.singleton, VarParsing.varType.float,
+    "CaloParticle creation threshold in GeV (mix.digitizers.calotruth.MinEnergy; 0.5 is the "
+    "release default). CaloTruthAccumulator only makes a CaloParticle for a gen-matched SimTrack "
+    "with E above it; Reco2Pico's low-momentum hadron gun uses 0.1.")
 options.register("truthReduced", 0, VarParsing.multiplicity.singleton, VarParsing.varType.int,
     "MC-truth graph scope: 0 = full detector (calo + MTD + muon + tracker, the default), "
     "1 = drop the tracker channel (customiseTruthReduced), enough for the calorimeter "
@@ -107,6 +111,14 @@ process.maxEvents.input = cms.untracked.int32(options.maxEvents)
 process.mix.digitizers.calotruth.produceLegacySimCluster = cms.bool(True)
 process.mix.digitizers.calotruth.produceBoundaryAndMergedSimCluster = cms.bool(True)
 process.g4SimHits.TrackingAction.SaveCaloBoundaryInformation = cms.bool(True)
+
+# CaloParticle energy threshold (release default 0.5 GeV). A gun particle below it gets no
+# CaloParticle, hence no ticlSimTrackstersFromCPs entry and no CaloParticle associations:
+# lower it (cpMinE=0.1, as Reco2Pico's gun_options.apply_gun_thresholds) for a gun that
+# reaches down to a few hundred MeV.
+if options.cpMinE < 0:
+    raise ValueError(f"cpMinE={options.cpMinE} must be >= 0")
+process.mix.digitizers.calotruth.MinEnergy = cms.double(float(options.cpMinE))
 
 # Retain the new mix:MergedCaloTruth* SimCluster/CaloParticle instances
 # (MergedCaloTruthBoundaryTrackSimCluster, MergedCaloTruthMergedSimCluster,
